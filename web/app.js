@@ -1,4 +1,6 @@
 // StockSim front end — plain ES module, no build step.
+import { BY_SYMBOL, COMPANIES, SECTORS } from './companies.js';
+
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
 
@@ -6,6 +8,7 @@ const state = {
   accounts: [], accountId: null, account: null,
   symbol: null, range: null, side: 'buy', type: 'market',
   quote: null, portfolio: null, watch: [], status: null, tab: 'positions', busy: false,
+  list: 'watch', sector: '全部', companyQuotes: {},
 };
 
 // ---------- formatting ----------
@@ -202,23 +205,77 @@ async function loadWatchlist() {
   state.watch = await api(withAcct('/api/watchlist'));
   const el = $('#watchlist');
   if (!state.watch.length) {
-    el.innerHTML = '<li class="empty">搜索股票后点 ☆ 加入自选</li>';
+    el.innerHTML = '<li class="empty">在"公司列表"里或搜索股票后点 ☆ 加入自选</li>';
   } else {
-    el.innerHTML = state.watch.map(({ symbol, quote: q }) => {
-      const chg = q?.prev_close ? q.price / q.prev_close - 1 : null;
-      return `<li data-symbol="${esc(symbol)}" class="${symbol === state.symbol ? 'active' : ''}">
-        <span class="sym">${esc(symbol)}</span>
-        <span class="px">${q ? fmtPx(q.price) : '—'}</span>
-        <span class="chg ${cls(chg)}">${fmtPct(chg)}</span></li>`;
-    }).join('');
+    el.innerHTML = state.watch.map(({ symbol, quote: q }) => quoteRow(symbol, q)).join('');
   }
-  $('#watch-toggle').textContent = state.watch.some((w) => w.symbol === state.symbol) ? '★' : '☆';
+  $('#watch-toggle').textContent = isWatched(state.symbol) ? '★' : '☆';
+  if (state.list === 'companies') renderCompanies();
+}
+
+const isWatched = (sym) => state.watch.some((w) => w.symbol === sym);
+
+function quoteRow(symbol, q, withStar = false) {
+  const chg = q?.prev_close ? q.price / q.prev_close - 1 : null;
+  const name = BY_SYMBOL[symbol]?.cn;
+  const star = withStar ? `<button class="star" data-star="${esc(symbol)}" title="加入/移出自选">${isWatched(symbol) ? '★' : '☆'}</button>` : '';
+  return `<li data-symbol="${esc(symbol)}" class="${symbol === state.symbol ? 'active' : ''}"
+      title="${esc(BY_SYMBOL[symbol]?.desc ?? '')}">${star}
+    <span class="who"><span class="sym">${esc(symbol)}</span>${name && name !== symbol ? `<span class="name">${esc(name)}</span>` : ''}</span>
+    <span class="px">${q ? fmtPx(q.price) : ''}</span>
+    <span class="chg ${cls(chg)}">${q ? fmtPct(chg) : ''}</span></li>`;
+}
+
+// ---------- company list ----------
+function renderCompanies() {
+  $('#sector-chips').innerHTML = ['全部', ...SECTORS].map((s) =>
+    `<button data-sector="${esc(s)}" class="${s === state.sector ? 'active' : ''}">${esc(s)}</button>`).join('');
+  const f = $('#company-filter').value.trim().toLowerCase();
+  const rows = COMPANIES.filter((c) => (state.sector === '全部' || c.sector === state.sector)
+    && (!f || c.symbol.toLowerCase().includes(f) || c.cn.toLowerCase().includes(f) || c.en.toLowerCase().includes(f)));
+  let html = '';
+  let last = null;
+  for (const c of rows) {
+    if (c.sector !== last && state.sector === '全部') html += `<li class="sector-head">${esc(c.sector)}</li>`;
+    last = c.sector;
+    html += quoteRow(c.symbol, state.companyQuotes[c.symbol], true);
+  }
+  $('#company-list').innerHTML = html || '<li class="empty">没有匹配的公司（可用上方搜索框搜索全部美股）</li>';
+}
+
+let companyQuotesAt = 0;
+async function loadCompanyQuotes(force = false) {
+  if (!force && Date.now() - companyQuotesAt < 25000) return;
+  companyQuotesAt = Date.now();
+  try {
+    const symbols = COMPANIES.map((c) => c.symbol).join(',');
+    state.companyQuotes = await api(withAcct(`/api/market/quotes?symbols=${encodeURIComponent(symbols)}`));
+  } catch { state.companyQuotes = {}; }
+  if (state.list === 'companies') renderCompanies();
+}
+
+function showList(list) {
+  state.list = list;
+  store.set('list', list);
+  $$('#list-tabs button').forEach((b) => b.classList.toggle('active', b.dataset.list === list));
+  $('#watchlist').hidden = list !== 'watch';
+  $('#companies').hidden = list !== 'companies';
+  if (list === 'companies') { renderCompanies(); loadCompanyQuotes(); }
+}
+
+async function toggleWatch(sym) {
+  try {
+    await api(withAcct(`/api/watchlist/${encodeURIComponent(sym)}`), { method: isWatched(sym) ? 'DELETE' : 'POST' });
+    await loadWatchlist();
+  } catch (e) { toast(e.message, 'error'); }
 }
 
 async function loadQuote() {
   if (!state.symbol) return;
   const sym = state.symbol;
   $('#q-symbol').textContent = sym;
+  const info = BY_SYMBOL[sym];
+  $('#q-desc').textContent = info ? `${info.cn}（${info.en}）· ${info.sector} · ${info.desc}` : '';
   try {
     const q = await api(withAcct(`/api/market/quote/${encodeURIComponent(sym)}`));
     if (sym !== state.symbol) return;
@@ -404,8 +461,8 @@ function selectSymbol(sym) {
   $('#q-price').textContent = '…';
   $('#q-change').textContent = '';
   $('#q-meta').textContent = '';
-  $$('#watchlist li').forEach((li) => li.classList.toggle('active', li.dataset.symbol === sym));
-  $('#watch-toggle').textContent = state.watch.some((w) => w.symbol === sym) ? '★' : '☆';
+  $$('#watchlist li, #company-list li').forEach((li) => li.classList.toggle('active', li.dataset.symbol === sym));
+  $('#watch-toggle').textContent = isWatched(sym) ? '★' : '☆';
   renderTicket();
   updateCostLine();
   loadQuote();
@@ -416,9 +473,11 @@ async function switchAccount(id) {
   state.accountId = id;
   store.set('accountId', String(id));
   state.portfolio = null;
+  state.companyQuotes = {};
   await loadAccounts();
   await refreshAll();
   loadChart();
+  if (state.list === 'companies') loadCompanyQuotes(true);
 }
 
 async function refreshAll() {
@@ -489,13 +548,23 @@ $('#watchlist').addEventListener('click', (e) => {
   const li = e.target.closest('li[data-symbol]');
   if (li) selectSymbol(li.dataset.symbol);
 });
-$('#watch-toggle').addEventListener('click', async () => {
-  if (!state.symbol) return;
-  const inList = state.watch.some((w) => w.symbol === state.symbol);
-  try {
-    await api(withAcct(`/api/watchlist/${encodeURIComponent(state.symbol)}`), { method: inList ? 'DELETE' : 'POST' });
-    await loadWatchlist();
-  } catch (e) { toast(e.message, 'error'); }
+$('#watch-toggle').addEventListener('click', () => { if (state.symbol) toggleWatch(state.symbol); });
+$('#list-tabs').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-list]');
+  if (b) showList(b.dataset.list);
+});
+$('#sector-chips').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-sector]');
+  if (!b) return;
+  state.sector = b.dataset.sector;
+  renderCompanies();
+});
+$('#company-filter').addEventListener('input', renderCompanies);
+$('#company-list').addEventListener('click', (e) => {
+  const star = e.target.closest('[data-star]');
+  if (star) { toggleWatch(star.dataset.star); return; }
+  const li = e.target.closest('li[data-symbol]');
+  if (li) selectSymbol(li.dataset.symbol);
 });
 $('#range-tabs').addEventListener('click', (e) => {
   const b = e.target.closest('button[data-range]');
@@ -593,6 +662,7 @@ setInterval(async () => {
   tick += 1;
   await refreshAll();
   if (state.range === '1d' && tick % 6 === 0) loadChart();
+  if (state.list === 'companies') loadCompanyQuotes();
 }, 5000);
 
 // ---------- boot ----------
@@ -607,4 +677,5 @@ setInterval(async () => {
   state.symbol = store.get('symbol', 'SPY');
   await refreshAll();
   selectSymbol(state.symbol);
+  showList(store.get('list', 'watch') === 'companies' ? 'companies' : 'watch');
 })();

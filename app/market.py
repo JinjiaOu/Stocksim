@@ -71,6 +71,31 @@ class YFinanceProvider(MarketDataProvider):
             out[s] = Quote(s, to_price4(sub["Close"].iloc[-1]), as_of, "yfinance:1m")
         return out
 
+    def daily_closes(self, symbols) -> dict[str, dict[date, float]]:
+        """Unadjusted daily closes for the last few sessions (for 'change vs previous close'), batched."""
+        now = time.monotonic()
+        with self._lock:
+            need = [s for s in symbols if (hit := self._bars.get(("closes", s))) is None or now - hit[0] > 900]
+        if need:
+            try:
+                df = yf.download(need, period="5d", interval="1d", group_by="ticker", auto_adjust=False,
+                                 progress=False, threads=True)
+            except Exception:
+                log.exception("daily close download failed for %s", need)
+                df = None
+            with self._lock:
+                for s in need:
+                    closes = {}
+                    if df is not None and not df.empty:
+                        try:
+                            sub = (df[s] if isinstance(df.columns, pd.MultiIndex) else df).dropna(subset=["Close"])
+                            closes = {ts.date(): float(c) for ts, c in zip(sub.index, sub["Close"])}
+                        except KeyError:
+                            pass
+                    self._bars[("closes", s)] = (now, closes)
+        with self._lock:
+            return {s: self._bars[("closes", s)][1] for s in symbols}
+
     def intraday_bars(self, symbol):
         def fetch():
             df = yf.Ticker(symbol).history(period="1d", interval="1m", auto_adjust=False)

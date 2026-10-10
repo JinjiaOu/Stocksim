@@ -34,8 +34,16 @@
         <input id="search-input" placeholder="搜索代码或公司，回车直接打开" autocomplete="off">
         <ul id="search-results" class="dropdown" hidden></ul>
       </div>
-      <h3>自选</h3>
+      <div class="tabs" id="list-tabs">
+        <button data-list="watch" class="active">自选</button>
+        <button data-list="companies">公司列表</button>
+      </div>
       <ul id="watchlist" class="watchlist"></ul>
+      <div id="companies" hidden>
+        <input id="company-filter" placeholder="筛选：代码 / 中文名 / 英文名" autocomplete="off">
+        <div id="sector-chips" class="chips"></div>
+        <ul id="company-list" class="watchlist companies"></ul>
+      </div>
     </section>
   </aside>
 
@@ -51,6 +59,7 @@
           <span id="q-change" class="q-change"></span>
         </div>
         <div id="q-meta" class="q-meta muted"></div>
+        <div id="q-desc" class="q-desc muted"></div>
         <div class="spacer"></div>
         <div id="range-tabs" class="tabs small"></div>
       </div>

@@ -57,12 +57,17 @@ def prev_close(conn, acct, q) -> float | None:
         row = conn.execute("SELECT close4 FROM daily_bars WHERE symbol = ? AND date < ? ORDER BY date DESC LIMIT 1",
                            (q.symbol, acct["sim_date"])).fetchone()
         return row["close4"] / 1e4 if row else None
-    df = provider.daily_bars(q.symbol, "5d")
-    if df is None:
-        return None
+    closes = provider.daily_closes([q.symbol])[q.symbol]  # served from cache when pre-fetched in batch
     day = q.as_of.astimezone(ET).date()
-    before = df[[ts.date() < day for ts in df.index]]
-    return float(before["Close"].iloc[-1]) if not before.empty else None
+    before = [d for d in closes if d < day]
+    return closes[max(before)] if before else None
+
+
+def live_quotes_json(conn, acct, symbols):
+    now = utcnow()
+    quotes = live.quotes(symbols, now) if symbols else {}
+    provider.daily_closes(symbols)
+    return {s: quote_json(q, now, prev_close(conn, acct, q)) for s in symbols if (q := quotes.get(s))}
 
 
 def replay_ready(conn, acct, symbol):
@@ -139,6 +144,18 @@ def search(q: str = Query(min_length=1, max_length=40)):
     return provider.search(q.strip())
 
 
+@router.get("/market/quotes")
+def get_quotes(symbols: str = Query(max_length=2000), account_id: int | None = None, conn=Depends(get_conn)):
+    """Batch quotes for list views. Replay returns only symbols already cached (no bulk history downloads)."""
+    syms = list(dict.fromkeys(symbol_of(s) for s in symbols.split(",") if s.strip()))[:150]
+    acct = account_of(conn, account_id)
+    if acct["mode"] == "live":
+        return live_quotes_json(conn, acct, syms)
+    cached = {r["symbol"] for r in conn.execute("SELECT symbol FROM bar_meta")}
+    return {s: quote_json(q, None, prev_close(conn, acct, q))
+            for s in syms if s in cached and (q := replay.quote(conn, acct, s))}
+
+
 @router.get("/market/quote/{symbol}")
 def get_quote(symbol: str, account_id: int | None = None, conn=Depends(get_conn)):
     s = symbol_of(symbol)
@@ -149,6 +166,8 @@ def get_quote(symbol: str, account_id: int | None = None, conn=Depends(get_conn)
     else:
         replay_ready(conn, acct, s)
         now, q = None, replay.quote(conn, acct, s)
+        if q is None:
+            raise HTTPException(404, f"{s} 在 {acct['sim_date']} 还没有交易数据（可能尚未上市）")
     if q is None:
         raise HTTPException(404, f"暂无 {s} 的行情")
     return quote_json(q, now, prev_close(conn, acct, q))
@@ -270,11 +289,10 @@ def get_watchlist(account_id: int | None = None, conn=Depends(get_conn)):
     symbols = [r["symbol"] for r in conn.execute("SELECT symbol FROM watchlist WHERE account_id = ? ORDER BY added_at",
                                                  (acct["id"],))]
     if acct["mode"] == "live":
-        now = utcnow()
-        quotes = live.quotes(symbols, now) if symbols else {}
+        quotes = live_quotes_json(conn, acct, symbols)
     else:
-        now, quotes = None, {s: replay.quote(conn, acct, s) for s in symbols}
-    return [{"symbol": s, "quote": quote_json(q := quotes.get(s), now, prev_close(conn, acct, q))} for s in symbols]
+        quotes = {s: quote_json(q, None, prev_close(conn, acct, q)) for s in symbols if (q := replay.quote(conn, acct, s))}
+    return [{"symbol": s, "quote": quotes.get(s)} for s in symbols]
 
 
 @router.post("/watchlist/{symbol}")

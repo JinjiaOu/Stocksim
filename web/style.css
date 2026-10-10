@@ -97,6 +97,19 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
 .watchlist .px { font-variant-numeric: tabular-nums; text-align: right; }
 .watchlist .chg { font-variant-numeric: tabular-nums; text-align: right; min-width: 60px; font-size: 12px; }
 .watchlist .empty { color: var(--muted); cursor: default; display: block; }
+.watchlist .name { display: block; font-size: 12px; color: var(--muted); font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.watchlist .who { min-width: 0; }
+.companies { max-height: 520px; overflow-y: auto; margin-top: 8px; }
+.companies li { grid-template-columns: auto minmax(0, 1fr) auto auto; }
+.companies .sector-head { display: block; cursor: default; padding: 10px 6px 2px; font-size: 12px; color: var(--muted); font-weight: 600; }
+.companies .sector-head:hover { background: none; }
+.companies .star { font-size: 15px; padding: 0 2px 0 0; }
+#company-filter { margin-bottom: 8px; }
+.chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.chips button { padding: 2px 8px; font-size: 12px; border-radius: 999px; background: transparent; color: var(--muted); }
+.chips button.active { color: var(--text); border-color: var(--accent); background: var(--panel-2); }
+.q-desc { flex-basis: 100%; font-size: 13px; margin-top: -4px; }
+.q-desc:empty { display: none; }
 
 /* quote + chart */
 .quote-head { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin-bottom: 8px; }
