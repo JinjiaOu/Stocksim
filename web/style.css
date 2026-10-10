@@ -17,6 +17,13 @@
 
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
+body.simple .full-only { display: none !important; }
+body:not(.simple) .simple-only { display: none !important; }
+.stat .hint { font-size: 11px; color: var(--muted); margin-top: 2px; line-height: 1.4; font-weight: 400; }
+#mode-btn.on { border-color: var(--up); color: var(--up); }
+.chart-help { margin: 8px 0 0; line-height: 1.6; }
+.confirm-note { margin-top: 4px; font-size: 13px; line-height: 1.6; color: #cfd5dd; }
+.sub { display: block; font-size: 11px; color: var(--muted); font-weight: 400; }
 body { margin: 0; background: var(--bg); color: var(--text); }
 button, input, select { font: inherit; color: inherit; }
 h3 { margin: 0 0 8px; font-size: 13px; color: var(--muted); font-weight: 600; letter-spacing: .02em; }

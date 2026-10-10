@@ -8,22 +8,24 @@
   <script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
+<!-- Elements with data-simple show that text in simple mode; their original text is used in full mode. -->
 <header class="topbar">
-  <div class="brand">StockSim <span class="badge-virtual">虚拟交易</span></div>
+  <div class="brand">StockSim <span class="badge-virtual" data-simple="假钱练习">虚拟交易</span></div>
   <select id="account-select" title="切换存档"></select>
   <div id="market-pill" class="pill">…</div>
   <div id="replay-controls" class="replay-controls" hidden>
-    <span class="muted">推进</span>
+    <span class="muted" data-simple="时间往后走：">推进</span>
     <button data-step="half">半天</button>
     <button data-step="day">1 天</button>
     <button data-step="week">1 周</button>
     <button data-step="month">1 月</button>
   </div>
   <div class="spacer"></div>
+  <button id="mode-btn" class="ghost" title="切换简单 / 完整显示，不影响存档">简单模式</button>
   <a href="guide.html"><button class="ghost">新手指南</button></a>
-  <button id="new-account-btn" class="ghost">新建存档</button>
-  <button id="reset-btn" class="ghost danger">重置账户</button>
-  <button id="archive-btn" class="ghost danger" hidden>归档</button>
+  <button id="new-account-btn" class="ghost" data-simple="开新的一局">新建存档</button>
+  <button id="reset-btn" class="ghost danger" data-simple="重新开始">重置账户</button>
+  <button id="archive-btn" class="ghost danger" hidden data-simple="收起这个存档">归档</button>
 </header>
 <div id="margin-banner" class="banner" hidden></div>
 
@@ -33,11 +35,12 @@
 
     <section class="card">
       <div class="search">
-        <input id="search-input" placeholder="搜索代码或公司，回车直接打开" autocomplete="off">
+        <input id="search-input" placeholder="搜索代码或公司，回车直接打开"
+               data-simple-placeholder="搜英文名或代码，比如 apple、AAPL" autocomplete="off">
         <ul id="search-results" class="dropdown" hidden></ul>
       </div>
       <div class="tabs" id="list-tabs">
-        <button data-list="watch" class="active">自选</button>
+        <button data-list="watch" class="active" data-simple="我关注的">自选</button>
         <button data-list="companies">公司列表</button>
       </div>
       <ul id="watchlist" class="watchlist"></ul>
@@ -66,33 +69,38 @@
         <div id="range-tabs" class="tabs small"></div>
       </div>
       <div id="chart" class="chart"></div>
+      <p class="chart-help muted small simple-only">
+        每根"蜡烛"是一天（或一分钟）的价格：<span class="up">绿色</span>＝这段时间涨了，<span class="down">红色</span>＝跌了，上下细线是最高价和最低价。
+        <span class="up">▲B</span> 是你买的位置，<span class="down">▼S</span> 是你卖的位置，黄色虚线是你的成本价。
+      </p>
     </section>
 
     <section class="card">
       <div class="tabs" id="bottom-tabs">
-        <button data-tab="positions" class="active">持仓</button>
-        <button data-tab="open">挂单</button>
-        <button data-tab="orders">订单历史</button>
-        <button data-tab="fills">成交</button>
+        <button data-tab="positions" class="active" data-simple="我的股票">持仓</button>
+        <button data-tab="open" class="full-only">挂单</button>
+        <button data-tab="orders" class="full-only">订单历史</button>
+        <button data-tab="fills" data-simple="买卖记录">成交</button>
       </div>
       <div id="tab-body" class="table-wrap"></div>
     </section>
   </section>
 
   <aside class="ticket card">
-    <h3>下单</h3>
+    <h3 data-simple="买卖">下单</h3>
     <div class="seg" id="side-seg">
       <button data-side="buy" class="active buy">买入</button>
       <button data-side="sell" class="sell">卖出</button>
     </div>
-    <div class="seg" id="type-seg">
+    <div class="seg full-only" id="type-seg">
       <button data-type="market" class="active">市价</button>
       <button data-type="limit">限价</button>
     </div>
     <label>股票<input id="t-symbol" readonly></label>
-    <label>数量（股）<input id="t-qty" type="number" min="1" step="1" value="10"></label>
+    <label id="t-amount-wrap" hidden>花多少钱（美元）<input id="t-amount" type="number" min="1" step="100" value="1000"></label>
+    <label id="t-qty-wrap"><span id="t-qty-label">数量（股）</span><input id="t-qty" type="number" min="1" step="1" value="10"></label>
     <div class="qty-shortcuts" id="qty-shortcuts">
-      <button data-frac="0.25">25%</button><button data-frac="0.5">50%</button><button data-frac="1">全部</button>
+      <button data-frac="0.25">25%</button><button data-frac="0.5">50%</button><button data-frac="1" data-simple="能用的全部">全部</button>
     </div>
     <label id="t-limit-wrap" hidden>限价（USD）<input id="t-limit" type="number" min="0.0001" step="0.01"></label>
     <div class="est" id="t-est"></div>
@@ -103,43 +111,43 @@
 
 <dialog id="confirm-dialog">
   <form method="dialog">
-    <h3>确认订单</h3>
+    <h3 data-simple="确认一下">确认订单</h3>
     <div id="confirm-body"></div>
     <div class="dialog-actions">
-      <button value="cancel" class="ghost">取消</button>
-      <button value="ok" class="primary" id="confirm-ok">确认提交</button>
+      <button value="cancel" class="ghost" data-simple="算了">取消</button>
+      <button value="ok" class="primary" id="confirm-ok" data-simple="确定">确认提交</button>
     </div>
   </form>
 </dialog>
 
 <dialog id="account-dialog">
   <form method="dialog">
-    <h3>新建存档</h3>
-    <label>模式
+    <h3 data-simple="开新的一局">新建存档</h3>
+    <label><span data-simple="怎么玩">模式</span>
       <select id="n-mode">
-        <option value="replay">历史回放（随时能玩，推进时间）</option>
-        <option value="live">实时（交易时段用最新行情）</option>
+        <option value="replay" data-simple="历史回放：穿越到过去，自己控制时间（随时能玩）">历史回放（随时能玩，推进时间）</option>
+        <option value="live" data-simple="实时：用现在的真实价格（只有美股开市时能买卖）">实时（交易时段用最新行情）</option>
       </select>
     </label>
-    <label>账户类型
+    <label><span data-simple="账户种类">账户类型</span>
       <select id="n-type">
-        <option value="cash">现金账户（只能做多，不借钱）</option>
-        <option value="margin">保证金账户（可做空、可加杠杆）</option>
+        <option value="cash" data-simple="普通账户：只用自己的钱，只能买涨（推荐新手）">现金账户（只能做多，不借钱）</option>
+        <option value="margin" data-simple="杠杆账户：可以借钱、可以卖空赌跌（风险大）">保证金账户（可做空、可加杠杆）</option>
       </select>
     </label>
-    <label id="n-leverage-wrap" hidden>杠杆
+    <label id="n-leverage-wrap" hidden><span data-simple="最多借多少">杠杆</span>
       <select id="n-leverage">
-        <option value="1">1 倍（只做空，不借钱）</option>
-        <option value="2" selected>2 倍（美国标准 Reg T）</option>
-        <option value="4">4 倍（高风险）</option>
+        <option value="1" data-simple="1 倍：不借钱，但可以卖空">1 倍（只做空，不借钱）</option>
+        <option value="2" selected data-simple="2 倍：最多借和本金一样多的钱">2 倍（美国标准 Reg T）</option>
+        <option value="4" data-simple="4 倍：最多借本金 3 倍的钱（非常危险）">4 倍（高风险）</option>
       </select>
     </label>
     <p id="n-margin-note" class="muted small" hidden></p>
-    <label id="n-start-wrap">开始日期（留空随机）<input id="n-start" type="date" min="1994-01-01"></label>
-    <label>初始资金（USD）<input id="n-initial" type="number" min="1000" step="1000" value="100000"></label>
-    <p id="n-replay-note" class="muted small">回放会归档当前进行中的回放存档。价格为复权价格，早年数值会与当时实际报价不同。</p>
+    <label id="n-start-wrap"><span data-simple="穿越到哪一天（不填就随机）">开始日期（留空随机）</span><input id="n-start" type="date" min="1994-01-01"></label>
+    <label><span data-simple="一开始给你多少钱（美元）">初始资金（USD）</span><input id="n-initial" type="number" min="1000" step="1000" value="100000"></label>
+    <p id="n-replay-note" class="muted small" data-simple="开新的回放会把正在玩的那局回放收起来。早年的股价会和你印象里的不一样，因为拆股、分红都已经折算进去了，涨跌比例是对的。">回放会归档当前进行中的回放存档。价格为复权价格，早年数值会与当时实际报价不同。</p>
     <div class="dialog-actions">
-      <button value="cancel" class="ghost">取消</button>
+      <button value="cancel" class="ghost" data-simple="算了">取消</button>
       <button value="ok" class="primary">开始</button>
     </div>
   </form>
