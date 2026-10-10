@@ -9,7 +9,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import db, trading
 from .api import live, router
-from .market import session_date
+from .market import ET, session_date
 from .models import utcnow
 
 log = logging.getLogger("stocksim")
@@ -18,19 +18,28 @@ WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 
 
 def live_tick() -> None:
-    """Expire stale DAY orders and match open live orders while the market is open."""
+    """For each live account: expire stale DAY orders, match open orders, accrue financing, enforce margin."""
     conn = db.connect()
     try:
-        account_id = db.live_account_id(conn)
         now = utcnow()
-        trading.expire_orders(conn, account_id, session_date(now).isoformat(), now)
-        symbols = sorted({o["symbol"] for o in trading.open_orders(conn, account_id)})
-        if symbols:
+        today = now.astimezone(ET).date().isoformat()
+        for acct in conn.execute("SELECT * FROM accounts WHERE mode = 'live' AND status = 'active'").fetchall():
+            account_id = acct["id"]
+            trading.expire_orders(conn, account_id, session_date(now).isoformat(), now)
+            held = trading.held_symbols(conn, account_id)
+            symbols = sorted({o["symbol"] for o in trading.open_orders(conn, account_id)} | set(held))
+            if not symbols:
+                continue
             quotes = live.quotes(symbols, now)
             if any(q.tradable for q in quotes.values()):
                 n = trading.match_open_orders(conn, account_id, quotes, now)
                 if n:
-                    log.info("filled %d live order(s)", n)
+                    log.info("account %d: filled %d live order(s)", account_id, n)
+            if acct["account_type"] == "margin":
+                trading.accrue_financing(conn, account_id, today, quotes, now)
+                result = trading.enforce_maintenance(conn, account_id, quotes, now)
+                if result:
+                    log.warning("account %d margin call: %s", account_id, result)
     finally:
         conn.close()
 

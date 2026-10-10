@@ -61,6 +61,16 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
 .pill.replay { border-color: var(--accent); color: var(--accent); }
 .replay-controls { display: flex; gap: 6px; align-items: center; }
 
+.banner { padding: 8px 16px; font-size: 13px; border-bottom: 1px solid var(--border); }
+.banner.warn { background: rgba(240, 180, 41, .12); color: var(--warn); }
+.banner.danger { background: rgba(239, 83, 80, .14); color: var(--down); }
+.meter { height: 6px; border-radius: 3px; background: var(--panel-2); overflow: hidden; margin-top: 4px; }
+.meter > div { height: 100%; background: var(--up); }
+.meter.mid > div { background: var(--warn); }
+.meter.high > div { background: var(--down); }
+.tag.long { color: var(--up); border-color: var(--up); }
+.tag.short { color: var(--down); border-color: var(--down); }
+
 /* layout */
 .layout {
   display: grid; grid-template-columns: 280px minmax(0, 1fr) 280px; gap: 12px; padding: 12px 16px;

@@ -153,20 +153,38 @@ async function loadAccounts() {
     state.accountId = state.accounts.some((a) => a.id === saved) ? saved : state.accounts[0].id;
   }
   state.account = state.accounts.find((a) => a.id === state.accountId);
-  $('#account-select').innerHTML = state.accounts.map((a) => {
-    const label = a.mode === 'live' ? '实时账户' : `回放 · ${a.start_date} 开局${a.status === 'finished' ? '（已结束）' : ''}`;
-    return `<option value="${a.id}" ${a.id === state.accountId ? 'selected' : ''}>${esc(label)}</option>`;
-  }).join('');
+  const options = state.accounts.map((a) =>
+    `<option value="${a.id}" ${a.id === state.accountId ? 'selected' : ''}>${esc(accountLabel(a))}</option>`).join('');
+  // Re-render only on change so polling doesn't close an open dropdown.
+  if ($('#account-select').dataset.html !== options) {
+    $('#account-select').innerHTML = options;
+    $('#account-select').dataset.html = options;
+  }
+  const defaultLive = Math.min(...state.accounts.filter((a) => a.mode === 'live').map((a) => a.id));
   $('#replay-controls').hidden = !isReplay();
   $('#reset-btn').hidden = isReplay();
+  $('#archive-btn').hidden = state.accountId === defaultLive;
   renderRangeTabs();
+}
+
+const isMargin = () => state.account?.account_type === 'margin';
+const ACCOUNT_STATUS = { finished: '（已结束）', bust: '（已爆仓）' };
+
+function accountLabel(a) {
+  const type = a.account_type === 'margin' ? `保证金 ${a.leverage}x` : '现金';
+  const status = ACCOUNT_STATUS[a.status] ?? '';
+  return a.mode === 'live' ? `实时 · ${type}${status}` : `回放 · ${a.start_date} · ${type}${status}`;
 }
 
 async function loadStatus() {
   const s = await api(withAcct('/api/market/status'));
   state.status = s;
   const pill = $('#market-pill');
-  if (s.mode === 'replay') {
+  if (state.account?.status === 'bust') {
+    pill.className = 'pill closed';
+    pill.textContent = s.mode === 'replay' ? `已爆仓 · ${s.sim_date}` : '已爆仓';
+    $$('#replay-controls button').forEach((b) => { b.disabled = true; });
+  } else if (s.mode === 'replay') {
     pill.className = 'pill replay';
     pill.textContent = s.status === 'active' ? `回放 ${s.sim_date} ${PHASE[s.sim_phase]}` : `回放已结束 · ${s.sim_date}`;
     $$('#replay-controls button').forEach((b) => { b.disabled = s.status !== 'active' || state.busy; });
@@ -177,19 +195,53 @@ async function loadStatus() {
   }
 }
 
+function renderMarginBanner(p) {
+  const el = $('#margin-banner');
+  const m = p.margin;
+  let html = '', kind = '';
+  if (state.account?.status === 'bust') {
+    kind = 'danger';
+    html = `账户已爆仓：净资产 ${fmtUsd(p.equity)}。${isReplay() ? '请新建一局回放。' : '可点"重置账户"重新开始。'}`;
+  } else if (m?.margin_call) {
+    kind = 'danger';
+    html = `保证金不足！净资产 ${fmtUsd(p.equity)} 低于维持保证金 ${fmtUsd(m.maintenance_requirement)}，下次可交易时将被强制平仓。`;
+  } else if (m?.usage > 0.8) {
+    kind = 'warn';
+    html = `接近强制平仓线：维持保证金已占净资产的 ${(m.usage * 100).toFixed(0)}%，还差 ${fmtUsd(m.maintenance_excess)} 就会被强平。`;
+  }
+  el.className = `banner ${kind}`;
+  el.textContent = html;
+  el.hidden = !html;
+}
+
 async function loadPortfolio() {
   const p = await api(withAcct('/api/portfolio'));
   state.portfolio = p;
   const unrealized = p.positions.reduce((s, x) => s + (x.unrealized ?? 0), 0);
-  const stats = [
+  const m = p.margin;
+  const pnl = [
+    ['', '未实现盈亏', `<span class="${cls(unrealized)}">${fmtSigned(unrealized)}</span>`],
+    ['', '已实现盈亏', `<span class="${cls(p.realized)}">${fmtSigned(p.realized)}</span>`],
+  ];
+  const stats = m ? [
+    ['big', '净资产', `${fmtUsd(p.equity)} <span class="${cls(p.total_return)}" style="font-size:14px">${fmtPct(p.total_return)}</span>`],
+    ['', p.cash < 0 ? '借款' : '现金', p.cash < 0 ? `<span class="down">${fmtUsd(-p.cash)}</span>` : fmtUsd(p.cash)],
+    ['', '购买力', fmtUsd(m.buying_power)],
+    ['', '多头市值', fmtUsd(m.long_value)],
+    ['', '空头市值', fmtUsd(m.short_value)],
+    ['', '杠杆', `${m.leverage == null ? '—' : m.leverage.toFixed(2)}x <span class="muted small">/ 上限 ${m.leverage_max}x</span>`],
+    ['', '维持保证金', fmtUsd(m.maintenance_requirement)],
+    ['big', '保证金使用率', usageMeter(m.usage)],
+    ...pnl,
+  ] : [
     ['big', '总资产', `${fmtUsd(p.equity)} <span class="${cls(p.total_return)}" style="font-size:14px">${fmtPct(p.total_return)}</span>`],
     ['', '现金', fmtUsd(p.cash)],
     ['', '可用资金', fmtUsd(p.available_cash)],
     ['', '持仓市值', fmtUsd(p.market_value)],
     ['', '挂单冻结', fmtUsd(p.reserved)],
-    ['', '未实现盈亏', `<span class="${cls(unrealized)}">${fmtSigned(unrealized)}</span>`],
-    ['', '已实现盈亏', `<span class="${cls(p.realized)}">${fmtSigned(p.realized)}</span>`],
+    ...pnl,
   ];
+  renderMarginBanner(p);
   if (p.benchmark_return != null) {
     stats.push(['', '同期 SPY', `<span class="${cls(p.benchmark_return)}">${fmtPct(p.benchmark_return)}</span>`]);
     const alpha = p.total_return - p.benchmark_return;
@@ -199,6 +251,15 @@ async function loadPortfolio() {
     `<div class="stat ${k}"><div class="label">${label}</div><div class="value">${v}</div></div>`).join('')
     + (p.unpriced_symbols.length ? `<div class="stat big small muted">无法估值：${esc(p.unpriced_symbols.join(', '))}</div>` : '');
   updateCostLine();
+}
+
+function usageMeter(usage) {
+  if (usage == null) return '<span class="down">—</span>';
+  const pct = Math.min(usage, 1);
+  const level = usage >= 0.8 ? 'high' : usage >= 0.5 ? 'mid' : '';
+  return `<span class="${usage >= 0.8 ? 'down' : ''}">${(usage * 100).toFixed(0)}%</span>
+    <span class="muted small">（100% 即强制平仓）</span>
+    <div class="meter ${level}"><div style="width:${(pct * 100).toFixed(1)}%"></div></div>`;
 }
 
 async function loadWatchlist() {
@@ -317,14 +378,18 @@ async function loadTab() {
   let html = '';
   if (tab === 'positions') {
     const p = state.portfolio ?? await api(withAcct('/api/portfolio'));
-    html = table(['代码', '数量', '均价', '现价', '市值', '未实现盈亏', '已实现', '占比', ''],
+    const margin = !!p.margin;
+    html = table(['代码', '方向', '数量', '均价', '现价', '市值', '未实现盈亏', '已实现', '占比', ...(margin ? ['强平价'] : []), ''],
       p.positions.map((x) => {
         const pct = x.unrealized != null ? x.unrealized / x.cost : null;
-        return `<tr><td>${symLink(x.symbol)}</td><td>${x.qty}${x.reserved_qty ? `<span class="muted small">（冻结 ${x.reserved_qty}）</span>` : ''}</td>
+        return `<tr><td>${symLink(x.symbol)}</td>
+          <td><span class="tag ${x.side}">${x.side === 'long' ? '多' : '空'}</span></td>
+          <td>${Math.abs(x.qty)}${x.reserved_qty ? `<span class="muted small">（冻结 ${x.reserved_qty}）</span>` : ''}</td>
           <td>${fmtPx(x.avg_cost)}</td><td>${fmtPx(x.price)}</td><td>${fmtUsd(x.market_value)}</td>
           <td class="${cls(x.unrealized)}">${fmtSigned(x.unrealized)} (${fmtPct(pct)})</td>
           <td class="${cls(x.realized)}">${fmtSigned(x.realized)}</td>
-          <td>${x.market_value != null && p.equity ? fmtPct(x.market_value / p.equity).replace('+', '') : '—'}</td>
+          <td>${x.market_value != null && p.equity > 0 ? fmtPct(Math.abs(x.market_value) / p.equity).replace('+', '') : '—'}</td>
+          ${margin ? `<td class="muted">${x.liquidation_price ? fmtPx(x.liquidation_price) : '—'}</td>` : ''}
           <td><button class="small" data-close="${esc(x.symbol)}">平仓</button></td></tr>`;
       }), '暂无持仓');
   } else if (tab === 'open') {
@@ -332,7 +397,7 @@ async function loadTab() {
     html = table(['代码', '方向', '类型', '数量', '限价', '冻结', '交易日', '下单时间', ''],
       orders.map((o) => `<tr><td>${symLink(o.symbol)}</td><td class="${o.side === 'buy' ? 'up' : 'down'}">${SIDE[o.side]}</td>
         <td>${TYPE[o.type]}</td><td>${o.qty}</td><td>${fmtPx(o.limit_price)}</td>
-        <td>${o.side === 'buy' ? fmtUsd(o.reserved) : `${o.qty} 股`}</td><td>${o.trade_date}</td><td>${fmtTime(o.placed_at)}</td>
+        <td>${isMargin() || o.side === 'buy' ? fmtUsd(o.reserved) : `${o.qty} 股`}</td><td>${o.trade_date}</td><td>${fmtTime(o.placed_at)}</td>
         <td><button class="small" data-cancel="${o.id}">撤单</button></td></tr>`), '暂无挂单');
   } else if (tab === 'orders') {
     const orders = await api(withAcct('/api/orders?limit=200'));
@@ -360,8 +425,28 @@ function ticketNumbers() {
   const ref = state.type === 'limit' ? limit : state.quote?.price;
   const px = ref ? (state.type === 'market' ? ref * (state.side === 'buy' ? 1 + slip() : 1 - slip()) : ref) : null;
   const pos = state.portfolio?.positions.find((p) => p.symbol === state.symbol);
+  const posQty = pos?.qty ?? 0;
   const sellable = pos ? pos.qty - pos.reserved_qty : 0;
-  return { qty, limit, px, amount: px && qty ? px * qty : null, sellable, cash: state.portfolio?.available_cash ?? 0 };
+  const out = { qty, limit, px, amount: px && qty ? px * qty : null, sellable, posQty, cash: state.portfolio?.available_cash ?? 0 };
+  const m = state.portfolio?.margin;
+  if (m && px) {
+    // Mirrors the server: extra initial margin for the new exposure; reducing orders need none.
+    const init = state.account.initial_margin_bps / 10000;
+    const newQty = posQty + (state.side === 'buy' ? qty : -qty);
+    const reducing = posQty !== 0 && Math.abs(newQty) < Math.abs(posQty) && (newQty === 0 || (newQty > 0) === (posQty > 0));
+    const curMark = state.quote?.price ?? px;
+    out.need = reducing ? 0 : Math.max(0, Math.abs(newQty) * px * init - Math.abs(posQty) * curMark * init);
+    out.excess = m.excess;
+    const closable = state.side === 'buy' ? Math.max(0, -posQty) : Math.max(0, posQty);
+    out.maxQty = closable + Math.max(0, Math.floor(m.excess / (px * init) + 1e-9));
+  }
+  return out;
+}
+
+function actionLabel(side, qty, posQty) {
+  if (!isMargin()) return '';
+  if (side === 'buy') return posQty < 0 ? (qty > -posQty ? '平空并做多' : '平空') : '做多';
+  return posQty > 0 ? (qty > posQty ? '平多并开空' : '平多') : '开空';
 }
 
 function renderTicket() {
@@ -369,33 +454,40 @@ function renderTicket() {
   $$('#side-seg button').forEach((b) => b.classList.toggle('active', b.dataset.side === state.side));
   $$('#type-seg button').forEach((b) => b.classList.toggle('active', b.dataset.type === state.type));
   $('#t-limit-wrap').hidden = state.type !== 'limit';
+  const n = ticketNumbers();
+  const action = actionLabel(state.side, n.qty, n.posQty);
   const btn = $('#t-submit');
   btn.className = `primary ${state.side}`;
-  btn.textContent = `${SIDE[state.side]} ${state.symbol ?? ''}`;
+  btn.textContent = `${SIDE[state.side]}${action ? `（${action}）` : ''} ${state.symbol ?? ''}`;
 
-  const n = ticketNumbers();
   const lines = [];
   let problem = null;
   if (n.amount != null) lines.push(`预计${state.side === 'buy' ? '花费' : '收入'} <b>${fmtUsd(n.amount)}</b>${state.type === 'market' ? `（含 ${state.account.slippage_bps}bp 滑点）` : ''}`);
-  if (state.side === 'buy') lines.push(`可用资金 <b>${fmtUsd(n.cash)}</b>`);
+  if (isMargin()) {
+    if (n.need != null) lines.push(`所需保证金 <b>${fmtUsd(n.need)}</b> / 可用 <b>${fmtUsd(Math.max(0, n.excess))}</b>`);
+    if (n.posQty) lines.push(`当前持仓 <b>${n.posQty > 0 ? `多 ${n.posQty}` : `空 ${-n.posQty}`}</b> 股`);
+  } else if (state.side === 'buy') lines.push(`可用资金 <b>${fmtUsd(n.cash)}</b>`);
   else lines.push(`可卖 <b>${n.sellable}</b> 股`);
 
   if (!state.symbol) problem = '先选择一只股票';
+  else if (state.account?.status === 'bust') problem = '账户已爆仓';
   else if (state.status?.mode === 'replay' && state.status.status !== 'active') problem = '回放已结束';
   else if (!Number.isInteger(n.qty) || n.qty <= 0) problem = '数量必须是正整数';
   else if (state.type === 'limit' && !(n.limit > 0)) problem = '请输入限价';
   else if (state.type === 'market' && !state.quote) problem = '暂无行情';
   else if (state.type === 'market' && !state.quote.tradable) problem = `现在不能市价成交：${state.quote.reason}`;
+  else if (isMargin()) { if (n.need > n.excess) problem = '保证金不足'; }
   else if (state.side === 'buy' && n.amount > n.cash) problem = '可用资金不足';
-  else if (state.side === 'sell' && n.qty > n.sellable) problem = '可卖股数不足';
+  else if (state.side === 'sell' && n.qty > n.sellable) problem = n.sellable ? '可卖股数不足' : '现金账户不能卖空（需要保证金账户）';
   if (problem) lines.push(`<span class="warn">${esc(problem)}</span>`);
   else if (state.type === 'limit' && state.quote && !state.quote.tradable) lines.push('<span class="warn">当前不可成交，挂单将在可交易时检查</span>');
 
   $('#t-est').innerHTML = lines.join('<br>');
   btn.disabled = !!problem || state.busy;
-  $('#t-note').textContent = isReplay()
+  $('#t-note').textContent = (isReplay()
     ? '当日有效（DAY）。收盘时下的单属于下一交易日。成交为模拟估算。'
-    : '当日有效（DAY）。成交为模拟估算，不代表真实可成交价格。';
+    : '当日有效（DAY）。成交为模拟估算，不代表真实可成交价格。')
+    + (isMargin() ? ` 保证金账户：借款年息 8%，做空年费 3%，按日计收。` : '');
 }
 
 // Resolve on the form's submit (which carries the clicked button) rather than the dialog's
@@ -428,12 +520,14 @@ async function submitOrder() {
   if (state.type === 'limit') body.limit_price = Number(n.limit.toFixed(4));
   const ok = await confirmDialog(`<div class="confirm-grid">
     <span>股票</span><span><b>${esc(state.symbol)}</b></span>
-    <span>方向</span><span class="${state.side === 'buy' ? 'up' : 'down'}">${SIDE[state.side]}</span>
+    <span>方向</span><span class="${state.side === 'buy' ? 'up' : 'down'}">${SIDE[state.side]}${isMargin() ? `（${actionLabel(state.side, n.qty, n.posQty)}）` : ''}</span>
     <span>类型</span><span>${TYPE[state.type]}${state.type === 'limit' ? ` @ ${fmtPx(n.limit)}` : ''}（当日有效）</span>
     <span>数量</span><span>${n.qty} 股</span>
     <span>预计金额</span><span>${fmtUsd(n.amount)}</span>
-    <span>账户</span><span>${isReplay() ? `回放（${state.account.sim_date} ${PHASE[state.account.sim_phase]}）` : '实时账户'}</span>
-  </div>`);
+    ${isMargin() ? `<span>所需保证金</span><span>${fmtUsd(n.need)}</span>` : ''}
+    <span>账户</span><span>${esc(accountLabel(state.account))}${isReplay() ? `（${state.account.sim_date} ${PHASE[state.account.sim_phase]}）` : ''}</span>
+  </div>${isMargin() && actionLabel(state.side, n.qty, n.posQty).includes('空') && state.side === 'sell'
+    ? '<p class="muted small">做空：股价上涨你亏钱，而且理论上亏损没有上限。</p>' : ''}`);
   if (!ok) return;
   state.busy = true;
   renderTicket();
@@ -482,7 +576,7 @@ async function switchAccount(id) {
 
 async function refreshAll() {
   try {
-    if (isReplay()) await loadAccounts(); // sim_date / phase may have moved
+    await loadAccounts(); // replay clock, bust / reset status may have changed
     await Promise.all([loadStatus(), loadPortfolio(), loadWatchlist()]);
     await Promise.all([loadQuote(), loadTab()]);
   } catch (e) {
@@ -498,8 +592,11 @@ async function advance(step) {
     const bits = [];
     if (ev.filled) bits.push(`成交 ${ev.filled} 笔`);
     if (ev.expired) bits.push(`过期 ${ev.expired} 笔`);
-    if (ev.finished) bits.push('已到达最新数据，回放结束');
-    if (bits.length) toast(bits.join('，'), ev.finished ? '' : 'ok');
+    if (ev.financing >= 0.01) bits.push(`利息/融券费 ${fmtUsd(ev.financing)}`);
+    if (ev.liquidated) bits.push(`⚠ 保证金不足，强制平仓 ${ev.liquidated} 个仓位`);
+    if (ev.bust) bits.push('账户爆仓，本局结束');
+    else if (ev.finished) bits.push('已到达最新数据，回放结束');
+    if (bits.length) toast(bits.join('，'), ev.liquidated || ev.bust ? 'error' : ev.finished ? '' : 'ok');
   } catch (e) {
     toast(e.message, 'error');
   } finally {
@@ -598,9 +695,9 @@ $('#tab-body').addEventListener('click', async (e) => {
   if (close) {
     const pos = state.portfolio.positions.find((p) => p.symbol === close.dataset.close);
     selectSymbol(pos.symbol);
-    state.side = 'sell';
+    state.side = pos.qty > 0 ? 'sell' : 'buy';
     state.type = 'market';
-    $('#t-qty').value = pos.qty - pos.reserved_qty;
+    $('#t-qty').value = pos.qty > 0 ? pos.qty - pos.reserved_qty : -pos.qty;
     renderTicket();
   }
 });
@@ -621,7 +718,8 @@ $('#qty-shortcuts').addEventListener('click', (e) => {
   const frac = Number(b.dataset.frac);
   const n = ticketNumbers();
   let max = 0;
-  if (state.side === 'sell') max = n.sellable;
+  if (n.maxQty != null) max = n.maxQty;
+  else if (state.side === 'sell') max = n.sellable;
   else if (n.px) max = Math.floor(n.cash / (n.px * (1 + 1e-9)) - 1e-9);
   $('#t-qty').value = Math.max(0, Math.floor(max * frac));
   renderTicket();
@@ -634,19 +732,49 @@ $('#replay-controls').addEventListener('click', (e) => {
   const b = e.target.closest('button[data-step]');
   if (b) advance(b.dataset.step);
 });
-$('#new-replay-btn').addEventListener('click', async () => {
-  if (!(await openDialog($('#replay-dialog')))) return;
-  const body = { initial: Number($('#r-initial').value) || 100000 };
-  if ($('#r-start').value) body.start_date = $('#r-start').value;
-  toast('正在准备历史数据…');
+function renderAccountDialog() {
+  const replayMode = $('#n-mode').value === 'replay';
+  const margin = $('#n-type').value === 'margin';
+  $('#n-start-wrap').hidden = !replayMode;
+  $('#n-replay-note').hidden = !replayMode;
+  $('#n-leverage-wrap').hidden = !margin;
+  $('#n-margin-note').hidden = !margin;
+  if (margin) {
+    const lev = Number($('#n-leverage').value);
+    const init = 100 / lev;
+    $('#n-margin-note').textContent = `开仓需自有资金 ${init.toFixed(1)}%；净资产跌破仓位价值的 ${(init / 2).toFixed(1)}%（多头）/ ${(init * 0.6).toFixed(1)}%（空头）会被强制平仓。借款年息 8%，做空年费 3%。`;
+  }
+}
+['#n-mode', '#n-type', '#n-leverage'].forEach((s) => $(s).addEventListener('change', renderAccountDialog));
+
+$('#new-account-btn').addEventListener('click', async () => {
+  renderAccountDialog();
+  if (!(await openDialog($('#account-dialog')))) return;
+  const body = {
+    mode: $('#n-mode').value, account_type: $('#n-type').value,
+    leverage: Number($('#n-leverage').value), initial: Number($('#n-initial').value) || 100000,
+  };
+  if (body.mode === 'replay' && $('#n-start').value) body.start_date = $('#n-start').value;
+  if (body.mode === 'replay') toast('正在准备历史数据…');
   try {
-    const acct = await api('/api/replay/new', { method: 'POST', body: JSON.stringify(body) });
-    toast(`回放开始：${acct.start_date}`, 'ok');
+    const acct = await api('/api/accounts', { method: 'POST', body: JSON.stringify(body) });
+    toast(`已创建：${accountLabel(acct)}`, 'ok');
     await switchAccount(acct.id);
   } catch (e) { toast(e.message, 'error'); }
 });
+$('#archive-btn').addEventListener('click', async () => {
+  if (!confirm(`归档「${accountLabel(state.account)}」？归档后不再显示在列表中，挂单会被撤销。`)) return;
+  try {
+    await api(`/api/accounts/${state.accountId}/archive`, { method: 'POST' });
+    toast('已归档', 'ok');
+    state.accountId = null;
+    store.set('accountId', '');
+    await loadAccounts();
+    await switchAccount(state.accountId);
+  } catch (e) { toast(e.message, 'error'); }
+});
 $('#reset-btn').addEventListener('click', async () => {
-  if (!confirm('重置实时账户？所有订单、成交和持仓将被清除，资金恢复初始值。')) return;
+  if (!confirm(`重置「${accountLabel(state.account)}」？所有订单、成交和持仓将被清除，资金恢复初始值。`)) return;
   try {
     await api(withAcct('/api/account/reset'), { method: 'POST' });
     toast('账户已重置', 'ok');

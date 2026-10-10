@@ -76,37 +76,74 @@ def replay_ready(conn, acct, symbol):
 
 
 def account_json(a):
-    return {k: a[k] for k in ("id", "mode", "status", "name", "start_date", "sim_date", "sim_phase", "created_at")} | {
-        "initial": a["initial_cents"] / 100, "slippage_bps": a["slippage_bps"], "commission": a["commission_cents"] / 100}
+    return {k: a[k] for k in ("id", "mode", "account_type", "status", "name", "start_date", "sim_date", "sim_phase",
+                              "created_at")} | {
+        "initial": a["initial_cents"] / 100, "slippage_bps": a["slippage_bps"], "commission": a["commission_cents"] / 100,
+        "leverage": round(10000 / a["initial_margin_bps"], 2), "maint_long_bps": a["maint_long_bps"],
+        "maint_short_bps": a["maint_short_bps"], "initial_margin_bps": a["initial_margin_bps"]}
+
+
+def et_today() -> str:
+    return utcnow().astimezone(ET).date().isoformat()
 
 
 # --- accounts -------------------------------------------------------------------
 
 @router.get("/accounts")
 def list_accounts(conn=Depends(get_conn)):
-    rows = conn.execute("SELECT * FROM accounts WHERE status != 'archived' OR mode = 'live' ORDER BY id").fetchall()
+    rows = conn.execute("SELECT * FROM accounts WHERE status != 'archived' ORDER BY mode, id").fetchall()
     return [account_json(a) for a in rows]
+
+
+class NewAccount(BaseModel):
+    mode: Literal["live", "replay"] = "replay"
+    account_type: Literal["cash", "margin"] = "cash"
+    leverage: Literal[1, 2, 4] = 2
+    start_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    initial: Decimal = Field(default=Decimal(100_000), ge=Decimal(1000), le=Decimal(1_000_000_000))
+
+
+@router.post("/accounts")
+def new_account(body: NewAccount, conn=Depends(get_conn)):
+    initial = int(body.initial * 100)
+    leverage = body.leverage if body.account_type == "margin" else 1
+    try:
+        if body.mode == "replay":
+            account_id = replay.new_game(conn, provider, initial, body.start_date, account_type=body.account_type,
+                                         leverage=leverage)
+        else:
+            label = "实时 · 现金" if body.account_type == "cash" else f"实时 · 保证金 {leverage}x"
+            account_id = trading.create_account(conn, "live", label, initial, utcnow(), account_type=body.account_type,
+                                                leverage=leverage, accrued_through=et_today())
+    except TradeError as e:
+        raise HTTPException(e.status, str(e))
+    return account_json(trading.get_account(conn, account_id))
+
+
+@router.post("/replay/new")
+def new_replay(body: NewAccount, conn=Depends(get_conn)):
+    return new_account(body.model_copy(update={"mode": "replay"}), conn)
+
+
+@router.post("/accounts/{account_id}/archive")
+def archive_account(account_id: int, conn=Depends(get_conn)):
+    acct = account_of(conn, account_id)
+    if acct["id"] == db.live_account_id(conn):
+        raise HTTPException(400, "默认实时账户不能归档，可以重置")
+    with db.tx(conn):
+        for o in trading.open_orders(conn, acct["id"]):
+            trading.cancel_order(conn, acct["id"], o["id"], utcnow())
+        conn.execute("UPDATE accounts SET status = 'archived' WHERE id = ?", (acct["id"],))
+    return {"ok": True}
 
 
 @router.post("/account/reset")
 def reset_account(account_id: int | None = None, conn=Depends(get_conn)):
     acct = account_of(conn, account_id)
-    trading.reset_account(conn, acct["id"], utcnow())
+    if acct["mode"] != "live":
+        raise HTTPException(400, "回放存档不能重置，请新建一局")
+    trading.reset_account(conn, acct["id"], utcnow(), et_today())
     return {"ok": True}
-
-
-class NewReplay(BaseModel):
-    start_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
-    initial: Decimal = Field(default=Decimal(100_000), gt=0, le=Decimal(1_000_000_000))
-
-
-@router.post("/replay/new")
-def new_replay(body: NewReplay, conn=Depends(get_conn)):
-    try:
-        account_id = replay.new_game(conn, provider, int(body.initial * 100), body.start_date)
-    except TradeError as e:
-        raise HTTPException(e.status, str(e))
-    return account_json(trading.get_account(conn, account_id))
 
 
 class Advance(BaseModel):
@@ -209,6 +246,15 @@ def order_json(o):
             "trade_date": o["trade_date"], "placed_at": o["placed_at"], "closed_at": o["closed_at"]}
 
 
+def marks_for(conn, acct, symbols) -> dict:
+    """Latest price per symbol (tradable or not) for valuation and margin sizing."""
+    if not symbols:
+        return {}
+    if acct["mode"] == "live":
+        return live.quotes(list(symbols), utcnow())
+    return {s: replay.mark(conn, acct, s) for s in symbols}
+
+
 @router.post("/orders")
 def place_order(body: OrderIn, conn=Depends(get_conn)):
     s = symbol_of(body.symbol)
@@ -221,9 +267,12 @@ def place_order(body: OrderIn, conn=Depends(get_conn)):
         replay_ready(conn, acct, s)
         now, q = replay.now_of(acct), replay.quote(conn, acct, s)
         trade_date = replay.session_date(conn, acct)
+    marks = marks_for(conn, acct, set(trading.held_symbols(conn, acct["id"])) | {s}) \
+        if acct["account_type"] == "margin" else None
     limit4 = to_price4(body.limit_price) if body.limit_price is not None else None
     try:
-        order_id = trading.place_order(conn, acct["id"], s, body.side, body.type, body.qty, limit4, q, trade_date, now)
+        order_id = trading.place_order(conn, acct["id"], s, body.side, body.type, body.qty, limit4, q, trade_date, now,
+                                       marks)
     except TradeError as e:
         raise HTTPException(e.status, str(e))
     return order_json(conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone())
@@ -265,12 +314,7 @@ def list_fills(account_id: int | None = None, limit: int = Query(200, le=1000), 
 @router.get("/portfolio")
 def get_portfolio(account_id: int | None = None, conn=Depends(get_conn)):
     acct = account_of(conn, account_id)
-    symbols = trading.held_symbols(conn, acct["id"])
-    if acct["mode"] == "live":
-        marks = live.quotes(symbols, utcnow()) if symbols else {}
-    else:
-        marks = {s: replay.mark(conn, acct, s) for s in symbols}
-    out = trading.portfolio(conn, acct["id"], marks)
+    out = trading.portfolio(conn, acct["id"], marks_for(conn, acct, trading.held_symbols(conn, acct["id"])))
     out["benchmark_return"] = None
     if acct["mode"] == "replay":  # buy-and-hold SPY from the game's first open
         start = conn.execute("SELECT open4 FROM daily_bars WHERE symbol = ? AND date = ?",

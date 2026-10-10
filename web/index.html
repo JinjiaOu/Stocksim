@@ -21,9 +21,11 @@
   </div>
   <div class="spacer"></div>
   <a href="guide.html"><button class="ghost">新手指南</button></a>
-  <button id="new-replay-btn" class="ghost">新回放</button>
+  <button id="new-account-btn" class="ghost">新建存档</button>
   <button id="reset-btn" class="ghost danger">重置账户</button>
+  <button id="archive-btn" class="ghost danger" hidden>归档</button>
 </header>
+<div id="margin-banner" class="banner" hidden></div>
 
 <main class="layout">
   <aside class="sidebar">
@@ -110,13 +112,32 @@
   </form>
 </dialog>
 
-<dialog id="replay-dialog">
+<dialog id="account-dialog">
   <form method="dialog">
-    <h3>开始新的历史回放</h3>
-    <p class="muted">用真实历史日线从过去某一天开始交易，每次推进半天 / 1 天 / 1 周 / 1 月。会归档当前回放存档。</p>
-    <label>开始日期（留空随机）<input id="r-start" type="date" min="1994-01-01"></label>
-    <label>初始资金（USD）<input id="r-initial" type="number" min="1000" step="1000" value="100000"></label>
-    <p class="muted small">价格为复权价格，早年数值会与当时实际报价不同。</p>
+    <h3>新建存档</h3>
+    <label>模式
+      <select id="n-mode">
+        <option value="replay">历史回放（随时能玩，推进时间）</option>
+        <option value="live">实时（交易时段用最新行情）</option>
+      </select>
+    </label>
+    <label>账户类型
+      <select id="n-type">
+        <option value="cash">现金账户（只能做多，不借钱）</option>
+        <option value="margin">保证金账户（可做空、可加杠杆）</option>
+      </select>
+    </label>
+    <label id="n-leverage-wrap" hidden>杠杆
+      <select id="n-leverage">
+        <option value="1">1 倍（只做空，不借钱）</option>
+        <option value="2" selected>2 倍（美国标准 Reg T）</option>
+        <option value="4">4 倍（高风险）</option>
+      </select>
+    </label>
+    <p id="n-margin-note" class="muted small" hidden></p>
+    <label id="n-start-wrap">开始日期（留空随机）<input id="n-start" type="date" min="1994-01-01"></label>
+    <label>初始资金（USD）<input id="n-initial" type="number" min="1000" step="1000" value="100000"></label>
+    <p id="n-replay-note" class="muted small">回放会归档当前进行中的回放存档。价格为复权价格，早年数值会与当时实际报价不同。</p>
     <div class="dialog-actions">
       <button value="cancel" class="ghost">取消</button>
       <button value="ok" class="primary">开始</button>

@@ -11,8 +11,8 @@ from datetime import date, datetime, timedelta, timezone
 from . import db
 from .market import CLOSE_T, ET, OPEN_T, MarketDataProvider
 from .models import Quote, iso, to_price4, utcnow
-from .trading import (TradeError, create_account, expire_orders, get_account, match_intraday,
-                      match_open_orders, open_orders)
+from .trading import (TradeError, accrue_financing, create_account, enforce_maintenance, expire_orders,
+                      get_account, held_symbols, match_intraday, match_open_orders, open_orders)
 
 CALENDAR = "SPY"
 EARLIEST_START = "2000-01-03"
@@ -45,7 +45,7 @@ def ensure_daily(conn, provider: MarketDataProvider, symbol: str, need_through: 
 
 
 def new_game(conn, provider: MarketDataProvider, initial_cents: int, start_date: str | None = None,
-             rng: random.Random | None = None) -> int:
+             rng: random.Random | None = None, account_type: str = "cash", leverage: float = 1.0) -> int:
     if not ensure_daily(conn, provider, CALENDAR):
         raise TradeError("无法获取交易日历（SPY 历史数据）", 503)
     dates = [r["date"] for r in conn.execute("SELECT date FROM daily_bars WHERE symbol = ? ORDER BY date",
@@ -60,8 +60,9 @@ def new_game(conn, provider: MarketDataProvider, initial_cents: int, start_date:
         start = (rng or random).choice(pool)
     with db.tx(conn):
         conn.execute("UPDATE accounts SET status = 'archived' WHERE mode = 'replay' AND status != 'archived'")
-        return create_account(conn, "replay", f"回放 {start}", initial_cents, utcnow(),
-                              start_date=start, sim_date=start, sim_phase="open")
+        return create_account(conn, "replay", f"回放 {start}", initial_cents, utcnow(), account_type=account_type,
+                              leverage=leverage, start_date=start, sim_date=start, sim_phase="open",
+                              accrued_through=start)
 
 
 def sim_time(d: str, phase: str) -> datetime:
@@ -131,9 +132,23 @@ def bars(conn, acct, symbol: str, limit: int) -> list[dict]:
     return out
 
 
+def _check_margin(conn, account_id: int, events: dict) -> None:
+    acct = get_account(conn, account_id)
+    quotes = {s: q for s in held_symbols(conn, account_id) if (q := quote(conn, acct, s))}
+    result = enforce_maintenance(conn, account_id, quotes, now_of(acct))
+    if result:
+        events["liquidated"] += len(result["closed"])
+        events["bust"] = result["bust"]
+        events.setdefault("margin_calls", []).append({"date": acct["sim_date"], **result})
+
+
 def advance(conn, account_id: int, half_steps: int) -> dict:
-    """Move the simulated clock forward, matching and expiring orders along the way."""
-    events = {"filled": 0, "expired": 0, "finished": False}
+    """Move the simulated clock forward, matching and expiring orders along the way.
+
+    Margin accounts are checked against maintenance at every open and close snapshot
+    (intraday extremes are not checked), and financing accrues on each overnight step.
+    """
+    events = {"filled": 0, "expired": 0, "liquidated": 0, "financing": 0.0, "bust": False, "finished": False}
     for _ in range(half_steps):
         acct = get_account(conn, account_id)
         if acct["mode"] != "replay":
@@ -151,6 +166,7 @@ def advance(conn, account_id: int, half_steps: int) -> dict:
                                                close)
             with db.tx(conn):
                 conn.execute("UPDATE accounts SET sim_phase = 'close' WHERE id = ?", (account_id,))
+            _check_margin(conn, account_id, events)
         else:
             nxt = next_trading_date(conn, d)
             if nxt is None:
@@ -158,11 +174,17 @@ def advance(conn, account_id: int, half_steps: int) -> dict:
                     conn.execute("UPDATE accounts SET status = 'finished' WHERE id = ?", (account_id,))
                 events["finished"] = True
                 break
+            marks = {s: mark(conn, acct, s) for s in held_symbols(conn, account_id)}
+            events["financing"] += accrue_financing(conn, account_id, nxt, marks, sim_time(nxt, "open")) / 100
             with db.tx(conn):
                 conn.execute("UPDATE accounts SET sim_date = ?, sim_phase = 'open' WHERE id = ?", (nxt, account_id))
             acct = get_account(conn, account_id)
             quotes = {o["symbol"]: q for o in open_orders(conn, account_id) if (q := quote(conn, acct, o["symbol"]))}
             events["filled"] += match_open_orders(conn, account_id, quotes, now_of(acct))
+            _check_margin(conn, account_id, events)
+        if events["bust"]:
+            events["finished"] = True
+            break
     acct = get_account(conn, account_id)
     events.update(sim_date=acct["sim_date"], sim_phase=acct["sim_phase"], status=acct["status"])
     return events
