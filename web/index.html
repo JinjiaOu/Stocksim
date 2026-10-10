@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>StockSim</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">StockSim <span class="badge-virtual">虚拟交易</span></div>
+  <select id="account-select" title="切换存档"></select>
+  <div id="market-pill" class="pill">…</div>
+  <div id="replay-controls" class="replay-controls" hidden>
+    <span class="muted">推进</span>
+    <button data-step="half">半天</button>
+    <button data-step="day">1 天</button>
+    <button data-step="week">1 周</button>
+    <button data-step="month">1 月</button>
+  </div>
+  <div class="spacer"></div>
+  <button id="new-replay-btn" class="ghost">新回放</button>
+  <button id="reset-btn" class="ghost danger">重置账户</button>
+</header>
+
+<main class="layout">
+  <aside class="sidebar">
+    <section class="card summary" id="summary"></section>
+
+    <section class="card">
+      <div class="search">
+        <input id="search-input" placeholder="搜索代码或公司，回车直接打开" autocomplete="off">
+        <ul id="search-results" class="dropdown" hidden></ul>
+      </div>
+      <h3>自选</h3>
+      <ul id="watchlist" class="watchlist"></ul>
+    </section>
+  </aside>
+
+  <section class="center">
+    <section class="card">
+      <div class="quote-head">
+        <div>
+          <span id="q-symbol" class="q-symbol">—</span>
+          <button id="watch-toggle" class="star" title="加入/移出自选">☆</button>
+        </div>
+        <div class="q-price-wrap">
+          <span id="q-price" class="q-price">—</span>
+          <span id="q-change" class="q-change"></span>
+        </div>
+        <div id="q-meta" class="q-meta muted"></div>
+        <div class="spacer"></div>
+        <div id="range-tabs" class="tabs small"></div>
+      </div>
+      <div id="chart" class="chart"></div>
+    </section>
+
+    <section class="card">
+      <div class="tabs" id="bottom-tabs">
+        <button data-tab="positions" class="active">持仓</button>
+        <button data-tab="open">挂单</button>
+        <button data-tab="orders">订单历史</button>
+        <button data-tab="fills">成交</button>
+      </div>
+      <div id="tab-body" class="table-wrap"></div>
+    </section>
+  </section>
+
+  <aside class="ticket card">
+    <h3>下单</h3>
+    <div class="seg" id="side-seg">
+      <button data-side="buy" class="active buy">买入</button>
+      <button data-side="sell" class="sell">卖出</button>
+    </div>
+    <div class="seg" id="type-seg">
+      <button data-type="market" class="active">市价</button>
+      <button data-type="limit">限价</button>
+    </div>
+    <label>股票<input id="t-symbol" readonly></label>
+    <label>数量（股）<input id="t-qty" type="number" min="1" step="1" value="10"></label>
+    <div class="qty-shortcuts" id="qty-shortcuts">
+      <button data-frac="0.25">25%</button><button data-frac="0.5">50%</button><button data-frac="1">全部</button>
+    </div>
+    <label id="t-limit-wrap" hidden>限价（USD）<input id="t-limit" type="number" min="0.0001" step="0.01"></label>
+    <div class="est" id="t-est"></div>
+    <button id="t-submit" class="primary buy">买入</button>
+    <p id="t-note" class="note muted">当日有效（DAY）。成交为模拟估算，不代表真实可成交价格。</p>
+  </aside>
+</main>
+
+<dialog id="confirm-dialog">
+  <form method="dialog">
+    <h3>确认订单</h3>
+    <div id="confirm-body"></div>
+    <div class="dialog-actions">
+      <button value="cancel" class="ghost">取消</button>
+      <button value="ok" class="primary" id="confirm-ok">确认提交</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="replay-dialog">
+  <form method="dialog">
+    <h3>开始新的历史回放</h3>
+    <p class="muted">用真实历史日线从过去某一天开始交易，每次推进半天 / 1 天 / 1 周 / 1 月。会归档当前回放存档。</p>
+    <label>开始日期（留空随机）<input id="r-start" type="date" min="1994-01-01"></label>
+    <label>初始资金（USD）<input id="r-initial" type="number" min="1000" step="1000" value="100000"></label>
+    <p class="muted small">价格为复权价格，早年数值会与当时实际报价不同。</p>
+    <div class="dialog-actions">
+      <button value="cancel" class="ghost">取消</button>
+      <button value="ok" class="primary">开始</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="toast" class="toast" hidden></div>
+<script type="module" src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,296 @@
+import re
+from decimal import Decimal
+from typing import Literal
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
+
+from . import db, replay, trading
+from .market import ET, LiveMarket, YFinanceProvider, session_date
+from .models import iso, to_price4, utcnow
+from .trading import TradeError
+
+router = APIRouter(prefix="/api")
+provider = YFinanceProvider()
+live = LiveMarket(provider)
+
+SYMBOL_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,11}$")
+
+
+def get_conn():
+    conn = db.connect()
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+def symbol_of(raw: str) -> str:
+    s = raw.strip().upper()
+    if not SYMBOL_RE.match(s):
+        raise HTTPException(400, "无效的股票代码")
+    return s
+
+
+def account_of(conn, account_id: int | None):
+    try:
+        return trading.get_account(conn, account_id if account_id is not None else db.live_account_id(conn))
+    except TradeError as e:
+        raise HTTPException(e.status, str(e))
+
+
+def quote_json(q, now=None, prev=None):
+    if q is None:
+        return None
+    out = {"symbol": q.symbol, "price": q.price4 / 1e4, "as_of": iso(q.as_of), "source": q.source,
+           "tradable": q.tradable, "reason": q.reason, "prev_close": prev}
+    if now is not None:
+        out["age_seconds"] = int((now - q.as_of).total_seconds())
+    return out
+
+
+def prev_close(conn, acct, q) -> float | None:
+    """Close of the trading day before the quote's day, for daily change display."""
+    if q is None:
+        return None
+    if acct["mode"] == "replay":
+        row = conn.execute("SELECT close4 FROM daily_bars WHERE symbol = ? AND date < ? ORDER BY date DESC LIMIT 1",
+                           (q.symbol, acct["sim_date"])).fetchone()
+        return row["close4"] / 1e4 if row else None
+    df = provider.daily_bars(q.symbol, "5d")
+    if df is None:
+        return None
+    day = q.as_of.astimezone(ET).date()
+    before = df[[ts.date() < day for ts in df.index]]
+    return float(before["Close"].iloc[-1]) if not before.empty else None
+
+
+def replay_ready(conn, acct, symbol):
+    if not replay.ensure_daily(conn, provider, symbol, acct["sim_date"]):
+        raise HTTPException(404, f"找不到 {symbol} 的历史数据")
+
+
+def account_json(a):
+    return {k: a[k] for k in ("id", "mode", "status", "name", "start_date", "sim_date", "sim_phase", "created_at")} | {
+        "initial": a["initial_cents"] / 100, "slippage_bps": a["slippage_bps"], "commission": a["commission_cents"] / 100}
+
+
+# --- accounts -------------------------------------------------------------------
+
+@router.get("/accounts")
+def list_accounts(conn=Depends(get_conn)):
+    rows = conn.execute("SELECT * FROM accounts WHERE status != 'archived' OR mode = 'live' ORDER BY id").fetchall()
+    return [account_json(a) for a in rows]
+
+
+@router.post("/account/reset")
+def reset_account(account_id: int | None = None, conn=Depends(get_conn)):
+    acct = account_of(conn, account_id)
+    trading.reset_account(conn, acct["id"], utcnow())
+    return {"ok": True}
+
+
+class NewReplay(BaseModel):
+    start_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    initial: Decimal = Field(default=Decimal(100_000), gt=0, le=Decimal(1_000_000_000))
+
+
+@router.post("/replay/new")
+def new_replay(body: NewReplay, conn=Depends(get_conn)):
+    try:
+        account_id = replay.new_game(conn, provider, int(body.initial * 100), body.start_date)
+    except TradeError as e:
+        raise HTTPException(e.status, str(e))
+    return account_json(trading.get_account(conn, account_id))
+
+
+class Advance(BaseModel):
+    account_id: int
+    step: Literal["half", "day", "week", "month"] = "half"
+
+
+@router.post("/replay/advance")
+def advance_replay(body: Advance, conn=Depends(get_conn)):
+    acct = account_of(conn, body.account_id)
+    if acct["mode"] == "replay":  # make sure every symbol we might need to match has history cached
+        for s in {o["symbol"] for o in trading.open_orders(conn, acct["id"])}:
+            replay.ensure_daily(conn, provider, s)
+    try:
+        return replay.advance(conn, acct["id"], replay.STEPS[body.step])
+    except TradeError as e:
+        raise HTTPException(e.status, str(e))
+
+
+# --- market ---------------------------------------------------------------------
+
+@router.get("/market/status")
+def market_status(account_id: int | None = None, conn=Depends(get_conn)):
+    acct = account_of(conn, account_id)
+    if acct["mode"] == "live":
+        return live.status(utcnow())
+    return {"mode": "replay", "open": acct["status"] == "active", "status": acct["status"],
+            "reason": None if acct["status"] == "active" else "回放已结束",
+            "now": iso(replay.now_of(acct)), "sim_date": acct["sim_date"], "sim_phase": acct["sim_phase"],
+            "session_date": replay.session_date(conn, acct)}
+
+
+@router.get("/market/search")
+def search(q: str = Query(min_length=1, max_length=40)):
+    return provider.search(q.strip())
+
+
+@router.get("/market/quote/{symbol}")
+def get_quote(symbol: str, account_id: int | None = None, conn=Depends(get_conn)):
+    s = symbol_of(symbol)
+    acct = account_of(conn, account_id)
+    if acct["mode"] == "live":
+        now = utcnow()
+        q = live.quotes([s], now).get(s)
+    else:
+        replay_ready(conn, acct, s)
+        now, q = None, replay.quote(conn, acct, s)
+    if q is None:
+        raise HTTPException(404, f"暂无 {s} 的行情")
+    return quote_json(q, now, prev_close(conn, acct, q))
+
+
+@router.get("/market/bars/{symbol}")
+def get_bars(symbol: str, account_id: int | None = None, range: Literal["1d", "1y", "5y"] = "1y",
+             conn=Depends(get_conn)):
+    s = symbol_of(symbol)
+    acct = account_of(conn, account_id)
+    if acct["mode"] == "replay":
+        replay_ready(conn, acct, s)
+        return replay.bars(conn, acct, s, 1260 if range == "5y" else 252)
+    if range == "1d":
+        return provider.intraday_bars(s)
+    df = provider.daily_bars(s, range)
+    if df is None:
+        return []
+    return [{"time": ts.date().isoformat(), "open": float(r.Open), "high": float(r.High), "low": float(r.Low),
+             "close": float(r.Close), "volume": int(r.Volume)} for ts, r in zip(df.index, df.itertuples())]
+
+
+# --- trading --------------------------------------------------------------------
+
+class OrderIn(BaseModel):
+    account_id: int | None = None
+    symbol: str
+    side: Literal["buy", "sell"]
+    type: Literal["market", "limit"]
+    qty: int = Field(gt=0, le=10_000_000)
+    limit_price: Decimal | None = Field(default=None, gt=0, le=Decimal(1_000_000), decimal_places=4)
+
+
+def order_json(o):
+    return {"id": o["id"], "symbol": o["symbol"], "side": o["side"], "type": o["type"], "qty": o["qty"],
+            "limit_price": o["limit_price4"] / 1e4 if o["limit_price4"] else None, "status": o["status"],
+            "reason": o["reason"], "reserved": o["reserved_cents"] / 100,
+            "fill_price": o["fill_price4"] / 1e4 if o["fill_price4"] else None,
+            "trade_date": o["trade_date"], "placed_at": o["placed_at"], "closed_at": o["closed_at"]}
+
+
+@router.post("/orders")
+def place_order(body: OrderIn, conn=Depends(get_conn)):
+    s = symbol_of(body.symbol)
+    acct = account_of(conn, body.account_id)
+    if acct["mode"] == "live":
+        now = utcnow()
+        q = live.quotes([s], now).get(s)
+        trade_date = session_date(now).isoformat()
+    else:
+        replay_ready(conn, acct, s)
+        now, q = replay.now_of(acct), replay.quote(conn, acct, s)
+        trade_date = replay.session_date(conn, acct)
+    limit4 = to_price4(body.limit_price) if body.limit_price is not None else None
+    try:
+        order_id = trading.place_order(conn, acct["id"], s, body.side, body.type, body.qty, limit4, q, trade_date, now)
+    except TradeError as e:
+        raise HTTPException(e.status, str(e))
+    return order_json(conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone())
+
+
+@router.post("/orders/{order_id}/cancel")
+def cancel_order(order_id: int, account_id: int | None = None, conn=Depends(get_conn)):
+    acct = account_of(conn, account_id)
+    now = utcnow() if acct["mode"] == "live" else replay.now_of(acct)
+    try:
+        trading.cancel_order(conn, acct["id"], order_id, now)
+    except TradeError as e:
+        raise HTTPException(e.status, str(e))
+    return order_json(conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone())
+
+
+@router.get("/orders")
+def list_orders(account_id: int | None = None, status: str | None = None, limit: int = Query(200, le=1000),
+                conn=Depends(get_conn)):
+    acct = account_of(conn, account_id)
+    sql, args = "SELECT * FROM orders WHERE account_id = ?", [acct["id"]]
+    if status:
+        sql += " AND status = ?"
+        args.append(status)
+    rows = conn.execute(sql + " ORDER BY id DESC LIMIT ?", (*args, limit)).fetchall()
+    return [order_json(o) for o in rows]
+
+
+@router.get("/fills")
+def list_fills(account_id: int | None = None, limit: int = Query(200, le=1000), conn=Depends(get_conn)):
+    acct = account_of(conn, account_id)
+    rows = conn.execute("SELECT * FROM fills WHERE account_id = ? ORDER BY id DESC LIMIT ?", (acct["id"], limit))
+    return [{"id": f["id"], "order_id": f["order_id"], "symbol": f["symbol"], "side": f["side"], "qty": f["qty"],
+             "price": f["price4"] / 1e4, "amount": f["amount_cents"] / 100, "fees": f["fees_cents"] / 100,
+             "quote_as_of": f["quote_as_of"], "executed_at": f["executed_at"], "estimated": bool(f["estimated"])}
+            for f in rows]
+
+
+@router.get("/portfolio")
+def get_portfolio(account_id: int | None = None, conn=Depends(get_conn)):
+    acct = account_of(conn, account_id)
+    symbols = trading.held_symbols(conn, acct["id"])
+    if acct["mode"] == "live":
+        marks = live.quotes(symbols, utcnow()) if symbols else {}
+    else:
+        marks = {s: replay.mark(conn, acct, s) for s in symbols}
+    out = trading.portfolio(conn, acct["id"], marks)
+    out["benchmark_return"] = None
+    if acct["mode"] == "replay":  # buy-and-hold SPY from the game's first open
+        start = conn.execute("SELECT open4 FROM daily_bars WHERE symbol = ? AND date = ?",
+                             (replay.CALENDAR, acct["start_date"])).fetchone()
+        now_mark = replay.mark(conn, acct, replay.CALENDAR)
+        if start and now_mark:
+            out["benchmark_return"] = now_mark.price4 / start["open4"] - 1
+    return out
+
+
+# --- watchlist ------------------------------------------------------------------
+
+@router.get("/watchlist")
+def get_watchlist(account_id: int | None = None, conn=Depends(get_conn)):
+    acct = account_of(conn, account_id)
+    symbols = [r["symbol"] for r in conn.execute("SELECT symbol FROM watchlist WHERE account_id = ? ORDER BY added_at",
+                                                 (acct["id"],))]
+    if acct["mode"] == "live":
+        now = utcnow()
+        quotes = live.quotes(symbols, now) if symbols else {}
+    else:
+        now, quotes = None, {s: replay.quote(conn, acct, s) for s in symbols}
+    return [{"symbol": s, "quote": quote_json(q := quotes.get(s), now, prev_close(conn, acct, q))} for s in symbols]
+
+
+@router.post("/watchlist/{symbol}")
+def add_watch(symbol: str, account_id: int | None = None, conn=Depends(get_conn)):
+    s = symbol_of(symbol)
+    acct = account_of(conn, account_id)
+    if acct["mode"] == "replay":
+        replay_ready(conn, acct, s)
+    with db.tx(conn):
+        conn.execute("INSERT OR IGNORE INTO watchlist VALUES (?, ?, ?)", (acct["id"], s, iso(utcnow())))
+    return {"ok": True}
+
+
+@router.delete("/watchlist/{symbol}")
+def remove_watch(symbol: str, account_id: int | None = None, conn=Depends(get_conn)):
+    acct = account_of(conn, account_id)
+    with db.tx(conn):
+        conn.execute("DELETE FROM watchlist WHERE account_id = ? AND symbol = ?", (acct["id"], symbol_of(symbol)))
+    return {"ok": True}
