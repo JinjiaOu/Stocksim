@@ -138,9 +138,9 @@ stocksim/
 - **P0 ✅** 行情验证（`scripts/p0_check.py`）
 - **P1 ✅** 后端账本 + 撮合 + API + 历史回放 + 单元测试（`pytest`）+ 冒烟测试（`scripts/smoke.py`）
 - **P2 ✅** 前端页面（仪表盘、行情/K 线、下单、持仓、历史、回放控制、SPY 基准对比）+ `start.bat`
-- **P3（进行中）** ✅ 公司列表、✅ 保证金账户与做空、✅ 多存档；待定：外汇、T+1、止损、拆股分红
+- **P3（进行中）** ✅ 公司列表、✅ 保证金账户与做空、✅ 多存档；✅ 外汇（v1）；待定：T+1、止损、拆股分红
 
-数据库版本记录在 `PRAGMA user_version`（当前 1）；v0→v1 自动迁移（重建 accounts / positions 表，保留数据）。
+数据库版本记录在 `PRAGMA user_version`（当前 2）；v0→v1 自动迁移（重建 accounts / positions 表，保留数据）；v1→v2 给 accounts 加 `market` 列（老账户为 `us`）。
 
 ## 11. 外汇（fx）
 
