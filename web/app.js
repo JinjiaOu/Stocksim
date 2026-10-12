@@ -2,6 +2,7 @@
 // Two display modes share all data and logic: "simple" (plain-language, fewer fields, buy by dollar
 // amount) and "full". Static text swaps via data-simple attributes; dynamic text uses T(simple, full).
 import { BY_SYMBOL, COMPANIES, SECTORS } from './companies.js';
+import { BY_SYMBOL as FX_BY_SYMBOL, PAIRS, SECTORS as FX_SECTORS } from './forex.js';
 
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
@@ -22,7 +23,7 @@ const state = {
 // ---------- formatting ----------
 const T = (simple, full) => (state.simple ? simple : full);
 const fmtUsd = (v) => v == null ? '—' : v.toLocaleString('en-US', { style: 'currency', currency: 'USD' });
-const fmtPx = (v) => v == null ? '—' : v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: v < 10 ? 4 : 2 });
+const fmtPx = (v) => v == null ? '—' : v.toLocaleString('en-US', { minimumFractionDigits: isFx() ? 4 : 2, maximumFractionDigits: isFx() ? 4 : (v < 10 ? 4 : 2) });
 const fmtPct = (v) => v == null || !isFinite(v) ? '—' : `${v >= 0 ? '+' : ''}${(v * 100).toFixed(2)}%`;
 const fmtSigned = (v) => v == null ? '—' : `${v >= 0 ? '+' : '−'}${fmtUsd(Math.abs(v))}`;
 const cls = (v) => v > 0 ? 'up' : v < 0 ? 'down' : '';
@@ -34,21 +35,55 @@ const SIDE = { buy: '买入', sell: '卖出' };
 const TYPE = { market: '市价', limit: '限价' };
 const STATUS = { open: '待成交', filled: '已成交', cancelled: '已撤销', expired: '已过期', rejected: '已拒绝' };
 const PHASE = { open: '开盘', close: '收盘' };
-const cnName = (sym) => BY_SYMBOL[sym]?.cn;
+const symbolInfo = (sym) => (isFx() ? FX_BY_SYMBOL : BY_SYMBOL)[sym];
+const cnName = (sym) => symbolInfo(sym)?.cn;
 
 const isReplay = () => state.account?.mode === 'replay';
 const isMargin = () => state.account?.account_type === 'margin';
+const isFx = () => state.account?.market === 'fx';
+const unit = () => isFx() ? '单位' : '股';
+const instrument = () => isFx() ? '货币对' : '股票';
+const catalog = () => isFx() ? PAIRS : COMPANIES;
+const symbolKey = () => isFx() ? 'symbol_fx' : 'symbol';
+
+function applyMarket() {
+  $('[data-list="companies"]').textContent = isFx() ? '货币对列表' : '公司列表';
+  const positions = $('[data-tab="positions"]');
+  positions.dataset.simple = isFx() ? '我的仓位' : '我的股票';
+  positions.textContent = T(positions.dataset.simple, '持仓');
+  $('#search-input').placeholder = isFx() ? '搜索货币对，比如 EUR、EURUSD=X' : T('搜英文名或代码，比如 apple、AAPL', '搜索代码或公司，回车直接打开');
+  $('#t-symbol-label').textContent = instrument();
+  const qty = $('#t-qty');
+  const market = isFx() ? 'fx' : 'us';
+  if (qty.dataset.market !== market) {
+    if (qty.dataset.market) qty.dataset[qty.dataset.market] = qty.value;
+    qty.value = qty.dataset[market] ?? (isFx() ? '1000' : '10');
+    qty.dataset.market = market;
+    $('#t-limit').value = '';
+    state.sector = '全部';
+    $('#company-filter').value = '';
+    $('#search-input').value = '';
+    clearTimeout(searchTimer);
+    searchSeq += 1;
+    hideResults();
+  }
+  qty.min = qty.step = isFx() ? '1000' : '1';
+  $('#t-limit').step = isFx() ? '0.0001' : '0.01';
+  candles.applyOptions({ priceFormat: { type: 'price', precision: isFx() ? 4 : 2, minMove: isFx() ? 0.0001 : 0.01 } });
+}
 const withAcct = (path) => `${path}${path.includes('?') ? '&' : '?'}account_id=${state.accountId}`;
 
 // Server messages rewritten in plain words for simple mode.
 const PLAIN = [
+  [/^外汇市场休市.*/, '外汇周末休市：美东时间周五 17:00 到周日 17:00 不能交易'],
+  [/^无最新行情（可能为外汇假日.*/, '现在拿不到最新汇率，可能是外汇假日，或者行情服务暂时出了问题'],
   [/^市场未开盘.*/, '现在休市。美股开市时间：美东时间周一到周五 9:30–16:00'],
   [/^无最新行情.*/, '今天可能是美股放假，或者暂时拿不到最新价格'],
   [/^行情过期$/, '价格不是最新的，暂时不能按这个价格买卖'],
   [/^价格异常跳变.*/, '价格突然变化太大，可能是数据出错，先暂停一下'],
-  [/^该股票当日无行情.*/, '这只股票这一天没有交易（可能还没上市，或者暂停交易）'],
+  [/^该品种当日无行情.*/, '这个品种这一天没有交易数据'],
   [/^(\S+) 在 (\S+) 还没有交易数据.*/, '$1 在 $2 还没上市，那时候买不到'],
-  [/^暂无该股票行情$/, '暂时拿不到这只股票的价格'],
+  [/^暂无该品种行情$/, '暂时拿不到这个品种的价格'],
   [/^可用资金不足$/, '钱不够'],
   [/^可用持仓不足（现金账户不能卖空，可卖 (\d+) 股）$/, '你手上只有 $1 股能卖。普通账户不能卖手上没有的股票'],
   [/^保证金不足（需要 (.+)，可用 (.+)）$/, '押金不够：这笔要押上你自己的钱 $1，你只剩 $2 可押。买少一点吧'],
@@ -61,8 +96,11 @@ const PLAIN = [
 ];
 function plain(msg) {
   if (!state.simple || !msg) return msg;
-  for (const [re, out] of PLAIN) if (re.test(msg)) return msg.replace(re, out);
-  return msg;
+  for (const [re, out] of PLAIN) {
+    if (isFx() && out.includes('美股')) continue;
+    if (re.test(msg)) { msg = msg.replace(re, out); break; }
+  }
+  return isFx() ? msg.replaceAll('该股票', '该货币对').replaceAll('股票', '货币对').replaceAll('股价', '汇价') : msg;
 }
 
 async function api(path, opts = {}) {
@@ -152,21 +190,22 @@ async function loadChart() {
   const token = ++chartToken;
   if (!state.symbol) return;
   const sym = state.symbol;
+  const accountId = state.accountId;
   try {
     const [bars, fills] = await Promise.all([
       api(withAcct(`/api/market/bars/${encodeURIComponent(sym)}?range=${state.range}`)),
       api(withAcct('/api/fills?limit=500')),
     ]);
-    if (token !== chartToken) return;
+    if (token !== chartToken || accountId !== state.accountId) return;
     const intraday = typeof bars[0]?.time === 'number';
     const data = bars.map((b) => ({ ...b, time: intraday ? etWall(b.time) : b.time }));
     candles.setData(data.map(({ time, open, high, low, close }) => ({ time, open, high, low, close })));
     volume.setData(data.map((b) => ({ time: b.time, value: b.volume, color: b.close >= b.open ? 'rgba(38,166,154,.35)' : 'rgba(239,83,80,.35)' })));
     candles.setMarkers(fillMarkers(fills.filter((f) => f.symbol === sym), data, intraday));
-    chartMsg(data.length ? '' : T('这只股票暂时没有价格走势图', '暂无 K 线数据'));
+    chartMsg(data.length ? '' : T(isFx() ? '这个货币对暂时没有价格走势图' : '这只股票暂时没有价格走势图', '暂无 K 线数据'));
     chart.timeScale().fitContent();
   } catch (e) {
-    if (token !== chartToken) return;
+    if (token !== chartToken || accountId !== state.accountId) return;
     candles.setData([]); volume.setData([]);
     chartMsg(plain(e.message));
   }
@@ -215,6 +254,7 @@ async function loadAccounts() {
     state.accountId = state.accounts.some((a) => a.id === saved) ? saved : state.accounts[0].id;
   }
   state.account = state.accounts.find((a) => a.id === state.accountId);
+  applyMarket();
   const options = state.accounts.map((a) =>
     `<option value="${a.id}" ${a.id === state.accountId ? 'selected' : ''}>${esc(accountLabel(a))}</option>`).join('');
   // Re-render only on change so polling doesn't close an open dropdown.
@@ -230,7 +270,7 @@ async function loadAccounts() {
 }
 
 function accountLabel(a) {
-  const type = a.account_type === 'margin'
+  const type = a.market === 'fx' ? `外汇 ${a.leverage}x` : a.account_type === 'margin'
     ? T(`杠杆账户 ${a.leverage}倍`, `保证金 ${a.leverage}x`)
     : T('普通账户', '现金');
   const status = { finished: '（已结束）', bust: T('（钱亏光了）', '（已爆仓）') }[a.status] ?? '';
@@ -238,7 +278,9 @@ function accountLabel(a) {
 }
 
 async function loadStatus() {
+  const accountId = state.accountId;
   const s = await api(withAcct('/api/market/status'));
+  if (accountId !== state.accountId) return;
   state.status = s;
   const pill = $('#market-pill');
   if (state.account?.status === 'bust') {
@@ -299,14 +341,14 @@ function simpleSummary(p) {
   const gain = p.equity - p.initial;
   const out = [
     stat('big', '我的钱', fmtUsd(p.equity),
-      m ? '扣掉借来的钱和股票之后，真正属于你的' : '现金 + 手上股票按现在的价格值多少'),
+      isFx() ? '现金加上多头价值、减去空头负债，真正属于你的钱' : m ? '扣掉借来的钱和股票之后，真正属于你的' : '现金 + 手上股票按现在的价格值多少'),
     stat('', gain >= 0 ? '赚了' : '亏了', `<span class="${cls(gain)}">${fmtUsd(Math.abs(gain))}<br><small>${fmtPct(p.total_return)}</small></span>`,
       `和一开始的 ${fmtUsd(p.initial)} 比`),
   ];
   if (m) {
-    out.push(stat('', '还能开多少仓位', fmtUsd(m.buying_power), '算上能借的钱，还能再买（或卖空）多少钱的股票'));
-    if (m.debit > 0) out.push(stat('', '借来的钱', `<span class="down">${fmtUsd(m.debit)}</span>`, '买股票时借的，每年收 8% 利息'));
-    if (m.short_value > 0) out.push(stat('', '借来卖掉的股票', fmtUsd(m.short_value), '现在把它们买回来还掉要花这么多，每年收 3% 费用'));
+    out.push(stat('', '还能开多少仓位', fmtUsd(m.buying_power), isFx() ? '按账户杠杆，还能买涨或卖空多少美元的外汇仓位' : '算上能借的钱，还能再买（或卖空）多少钱的股票'));
+    if (m.debit > 0) out.push(stat('', '借来的钱', `<span class="down">${fmtUsd(m.debit)}</span>`, isFx() ? '外汇杠杆仓位形成的借款，不计融资利息' : '买股票时借的，每年收 8% 利息'));
+    if (m.short_value > 0) out.push(stat('', isFx() ? '卖空仓位' : '借来卖掉的股票', fmtUsd(m.short_value), isFx() ? '按当前汇价买回平仓需要的金额，不计借入费用' : '现在把它们买回来还掉要花这么多，每年收 3% 费用'));
     out.push(stat('big', '风险', usageMeter(m.usage, true), '到 100% 系统会自动帮你平仓（强制卖出或买回），亏损就定死了'));
   } else {
     out.push(stat('', '能用的现金', fmtUsd(p.available_cash), '现在还能拿去买股票的钱'));
@@ -314,8 +356,8 @@ function simpleSummary(p) {
   }
   if (p.benchmark_return != null) {
     const alpha = p.total_return - p.benchmark_return;
-    out.push(stat('', '如果全买大盘', `<span class="${cls(p.benchmark_return)}">${fmtPct(p.benchmark_return)}</span>`, '同一时间把钱全买 SPY 一直拿着的收益'));
-    out.push(stat('', alpha >= 0 ? '比大盘多赚' : '比大盘少赚', `<span class="${cls(alpha)}">${fmtPct(Math.abs(alpha)).replace('+', '')}</span>`, '你的收益减去大盘的收益'));
+    out.push(stat('', isFx() ? esc(p.benchmark_name ?? 'USD 现金') : '如果全买大盘', `<span class="${cls(p.benchmark_return)}">${fmtPct(p.benchmark_return)}</span>`, isFx() ? '一直持有美元现金的收益为 0%' : '同一时间把钱全买 SPY 一直拿着的收益'));
+    out.push(stat('', isFx() ? (alpha >= 0 ? '比现金多赚' : '比现金少赚') : alpha >= 0 ? '比大盘多赚' : '比大盘少赚', `<span class="${cls(alpha)}">${fmtPct(Math.abs(alpha)).replace('+', '')}</span>`, isFx() ? '你的收益减去美元现金的收益' : '你的收益减去大盘的收益'));
   }
   return out.join('');
 }
@@ -348,14 +390,16 @@ function fullSummary(p) {
   ];
   if (p.benchmark_return != null) {
     const alpha = p.total_return - p.benchmark_return;
-    out.push(stat('', '同期 SPY', `<span class="${cls(p.benchmark_return)}">${fmtPct(p.benchmark_return)}</span>`));
-    out.push(stat('', '跑赢大盘', `<span class="${cls(alpha)}">${fmtPct(alpha)}</span>`));
+    out.push(stat('', isFx() ? esc(p.benchmark_name ?? 'USD 现金') : '同期 SPY', `<span class="${cls(p.benchmark_return)}">${fmtPct(p.benchmark_return)}</span>`));
+    out.push(stat('', isFx() ? '超额收益（对现金）' : '跑赢大盘', `<span class="${cls(alpha)}">${fmtPct(alpha)}</span>`));
   }
   return out.join('');
 }
 
 async function loadPortfolio() {
+  const accountId = state.accountId;
   const p = await api(withAcct('/api/portfolio'));
+  if (accountId !== state.accountId) return;
   state.portfolio = p;
   renderMarginBanner(p);
   $('#summary').innerHTML = (state.simple ? simpleSummary(p) : fullSummary(p))
@@ -366,10 +410,13 @@ async function loadPortfolio() {
 
 // ---------- watchlist & company list ----------
 async function loadWatchlist() {
-  state.watch = await api(withAcct('/api/watchlist'));
+  const accountId = state.accountId;
+  const watch = await api(withAcct('/api/watchlist'));
+  if (accountId !== state.accountId) return;
+  state.watch = watch;
   const el = $('#watchlist');
   if (!state.watch.length) {
-    el.innerHTML = `<li class="empty">${T('还没有关注的股票。去"公司列表"里点 ☆ 就能加进来', '在"公司列表"里或搜索股票后点 ☆ 加入自选')}</li>`;
+    el.innerHTML = `<li class="empty">${isFx() ? '还没有关注的货币对。去"货币对列表"里点 ☆ 加入自选' : T('还没有关注的股票。去"公司列表"里点 ☆ 就能加进来', '在"公司列表"里或搜索股票后点 ☆ 加入自选')}</li>`;
   } else {
     el.innerHTML = state.watch.map(({ symbol, quote: q }) => quoteRow(symbol, q)).join('');
   }
@@ -384,17 +431,17 @@ function quoteRow(symbol, q, withStar = false) {
   const name = cnName(symbol);
   const star = withStar ? `<button class="star" data-star="${esc(symbol)}" title="加入/移出自选">${isWatched(symbol) ? '★' : '☆'}</button>` : '';
   return `<li data-symbol="${esc(symbol)}" class="${symbol === state.symbol ? 'active' : ''}"
-      title="${esc(BY_SYMBOL[symbol]?.desc ?? '')}">${star}
+      title="${esc(symbolInfo(symbol)?.desc ?? '')}">${star}
     <span class="who"><span class="sym">${esc(symbol)}</span>${name && name !== symbol ? `<span class="name">${esc(name)}</span>` : ''}</span>
     <span class="px">${q ? fmtPx(q.price) : ''}</span>
     <span class="chg ${cls(chg)}">${q ? fmtPct(chg) : ''}</span></li>`;
 }
 
 function renderCompanies() {
-  $('#sector-chips').innerHTML = ['全部', ...SECTORS].map((s) =>
+  $('#sector-chips').innerHTML = ['全部', ...(isFx() ? FX_SECTORS : SECTORS)].map((s) =>
     `<button data-sector="${esc(s)}" class="${s === state.sector ? 'active' : ''}">${esc(s)}</button>`).join('');
   const f = $('#company-filter').value.trim().toLowerCase();
-  const rows = COMPANIES.filter((c) => (state.sector === '全部' || c.sector === state.sector)
+  const rows = catalog().filter((c) => (state.sector === '全部' || c.sector === state.sector)
     && (!f || c.symbol.toLowerCase().includes(f) || c.cn.toLowerCase().includes(f) || c.en.toLowerCase().includes(f)));
   let html = '';
   let last = null;
@@ -403,17 +450,20 @@ function renderCompanies() {
     last = c.sector;
     html += quoteRow(c.symbol, state.companyQuotes[c.symbol], true);
   }
-  $('#company-list').innerHTML = html || '<li class="empty">没有匹配的公司（可用上方搜索框搜索全部美股）</li>';
+  $('#company-list').innerHTML = html || (isFx() ? '<li class="empty">没有匹配的货币对</li>' : '<li class="empty">没有匹配的公司（可用上方搜索框搜索全部美股）</li>');
 }
 
 let companyQuotesAt = 0;
 async function loadCompanyQuotes(force = false) {
   if (!force && Date.now() - companyQuotesAt < 25000) return;
   companyQuotesAt = Date.now();
+  const accountId = state.accountId;
   try {
-    const symbols = COMPANIES.map((c) => c.symbol).join(',');
-    state.companyQuotes = await api(withAcct(`/api/market/quotes?symbols=${encodeURIComponent(symbols)}`));
-  } catch { state.companyQuotes = {}; }
+    const symbols = catalog().map((c) => c.symbol).join(',');
+    const quotes = await api(withAcct(`/api/market/quotes?symbols=${encodeURIComponent(symbols)}`));
+    if (accountId !== state.accountId) return;
+    state.companyQuotes = quotes;
+  } catch { if (accountId !== state.accountId) return; state.companyQuotes = {}; }
   if (state.list === 'companies') renderCompanies();
 }
 
@@ -437,12 +487,13 @@ async function toggleWatch(sym) {
 async function loadQuote() {
   if (!state.symbol) return;
   const sym = state.symbol;
+  const accountId = state.accountId;
   $('#q-symbol').textContent = sym;
-  const info = BY_SYMBOL[sym];
+  const info = symbolInfo(sym);
   $('#q-desc').textContent = info ? `${info.cn}（${info.en}）· ${info.sector} · ${info.desc}` : '';
   try {
     const q = await api(withAcct(`/api/market/quote/${encodeURIComponent(sym)}`));
-    if (sym !== state.symbol) return;
+    if (sym !== state.symbol || accountId !== state.accountId) return;
     state.quote = q;
     $('#q-price').textContent = fmtPx(q.price);
     const chg = q.prev_close ? q.price - q.prev_close : null;
@@ -462,7 +513,7 @@ async function loadQuote() {
     if (!q.tradable && q.reason) meta.push(`<span class="stale">${esc(plain(q.reason))}</span>`);
     $('#q-meta').innerHTML = meta.join(' · ');
   } catch (e) {
-    if (sym !== state.symbol) return;
+    if (sym !== state.symbol || accountId !== state.accountId) return;
     state.quote = null;
     $('#q-price').textContent = '—';
     $('#q-change').textContent = '';
@@ -483,7 +534,7 @@ const symCell = (s) => `${symLink(s)}${state.simple && cnName(s) ? `<span class=
 function positionsTable(p) {
   const margin = !!p.margin;
   if (state.simple) {
-    return table(['股票', ...(margin ? ['方向'] : []), '股数', '平均成本', '现价', '现在值', '现在平掉能', ...(margin ? ['到这个价会被强平'] : []), ''],
+    return table([instrument(), ...(margin ? ['方向'] : []), isFx() ? '单位' : '股数', '平均成本', '现价', '现在值', '现在平掉能', ...(margin ? ['到这个价会被强平'] : []), ''],
       p.positions.map((x) => {
         const pct = x.unrealized != null ? x.unrealized / x.cost : null;
         const verb = x.unrealized == null ? '' : x.unrealized >= 0 ? '赚 ' : '亏 ';
@@ -494,7 +545,7 @@ function positionsTable(p) {
           <td class="${cls(x.unrealized)}">${verb}${fmtUsd(x.unrealized == null ? null : Math.abs(x.unrealized))}<br><small>${fmtPct(pct)}</small></td>
           ${margin ? `<td class="muted">${x.liquidation_price ? fmtPx(x.liquidation_price) : '—'}</td>` : ''}
           <td><button class="small" data-close="${esc(x.symbol)}">${x.side === 'long' ? '全部卖掉' : '全部买回'}</button></td></tr>`;
-      }), '你还没有股票。在右边"买卖"里买一点试试吧');
+      }), isFx() ? '你还没有仓位。在右边选择单位数，买涨或卖空试试吧' : '你还没有股票。在右边"买卖"里买一点试试吧');
   }
   return table(['代码', '方向', '数量', '均价', '现价', '市值', '未实现盈亏', '已实现', '占比', ...(margin ? ['强平价'] : []), ''],
     p.positions.map((x) => {
@@ -513,6 +564,7 @@ function positionsTable(p) {
 
 async function loadTab() {
   const tab = state.tab;
+  const accountId = state.accountId;
   let html = '';
   if (tab === 'positions') {
     html = positionsTable(state.portfolio ?? await api(withAcct('/api/portfolio')));
@@ -532,7 +584,7 @@ async function loadTab() {
         <td><span class="tag ${o.status}">${STATUS[o.status]}</span></td><td class="muted">${esc(o.reason ?? '')}</td></tr>`), '暂无订单');
   } else if (state.simple) {
     const fills = await api(withAcct('/api/fills?limit=200'));
-    html = table(['时间（美东）', '股票', '做了什么', '股数', '价格', '金额'],
+    html = table(['时间（美东）', instrument(), '做了什么', isFx() ? '单位' : '股数', '价格', '金额'],
       fills.map((f) => `<tr><td>${fmtTime(f.executed_at)}</td><td>${symCell(f.symbol)}</td>
         <td class="${f.side === 'buy' ? 'up' : 'down'}">${SIDE[f.side]}</td><td>${f.qty}</td><td>${fmtPx(f.price)}</td>
         <td>${fmtUsd(f.amount)}</td></tr>`), '还没有买卖过');
@@ -543,7 +595,7 @@ async function loadTab() {
         <td class="${f.side === 'buy' ? 'up' : 'down'}">${SIDE[f.side]}</td><td>${f.qty}</td><td>${fmtPx(f.price)}</td>
         <td>${fmtUsd(f.amount)}</td><td>${fmtUsd(f.fees)}</td><td class="muted small">${f.estimated ? '模拟估算' : ''}</td></tr>`), '暂无成交');
   }
-  if (tab === state.tab) $('#tab-body').innerHTML = html;
+  if (tab === state.tab && accountId === state.accountId) $('#tab-body').innerHTML = html;
 }
 
 function selectTab(tab) {
@@ -556,7 +608,7 @@ function selectTab(tab) {
 const slip = () => (state.account?.slippage_bps ?? 0) / 10000;
 const currentPos = () => state.portfolio?.positions.find((p) => p.symbol === state.symbol);
 // Simple mode buys by dollar amount, except when buying back a short (then shares are clearer).
-const amountMode = () => state.simple && state.side === 'buy' && (currentPos()?.qty ?? 0) >= 0;
+const amountMode = () => !isFx() && state.simple && state.side === 'buy' && (currentPos()?.qty ?? 0) >= 0;
 
 function ticketNumbers() {
   const limit = Number($('#t-limit').value);
@@ -593,6 +645,14 @@ function actionLabel(side, qty, posQty) {
 
 // Plain-language action: [button verb, longer explanation].
 function plainAction(side, qty, posQty) {
+  if (isFx()) {
+    if (side === 'buy') return posQty < 0
+      ? (qty > -posQty ? ['买回并买涨', '先买回平掉空头，多出的单位转为买涨'] : ['买回', '买回之前卖空的基础货币，平掉空头'])
+      : ['买入', '买入基础货币，汇价上涨你就赚'];
+    return posQty > 0
+      ? (qty > posQty ? ['卖光并卖空', '先平掉多头，多出的单位转为卖空'] : ['卖出', '卖掉持有的基础货币，平掉多头'])
+      : ['卖空', '卖空基础货币，之后买回平仓；汇价下跌你赚，上涨你亏'];
+  }
   if (side === 'buy') {
     if (posQty < 0) return qty > -posQty ? ['买回并买涨', '先把借来卖掉的股票全部买回还掉，多出来的部分变成买涨'] : ['买回', '把之前借来卖掉的股票买回来还掉'];
     return ['买入', '买进来，涨了你就赚'];
@@ -610,7 +670,9 @@ function renderTicket() {
   $('#t-amount-wrap').hidden = !amountMode();
   $('#t-qty-wrap').hidden = amountMode();
   const n = ticketNumbers();
-  $('#t-qty-label').textContent = T(
+  $('#t-lots').hidden = !isFx();
+  $('#t-lots').textContent = `= ${Number.isFinite(n.qty) ? n.qty / 1000 : '—'} 微型手（1 微型手 = 1000 单位）`;
+  $('#t-qty-label').textContent = isFx() ? '数量（单位）' : T(
     state.side === 'sell' ? (n.posQty > 0 ? '卖几股' : '卖空几股') : '买回几股', '数量（股）');
 
   const btn = $('#t-submit');
@@ -628,29 +690,30 @@ function renderTicket() {
     else if (n.amount != null) lines.push(`大约${state.side === 'buy' ? '要花' : '能收到'} <b>${fmtUsd(n.amount)}</b>`);
     if (isMargin()) {
       if (n.need) lines.push(`要押上你自己的钱 <b>${fmtUsd(n.need)}</b>（你还能押 <b>${fmtUsd(Math.max(0, n.excess))}</b>）`);
-      if (n.borrow > 0) lines.push(`其中要借 <b>${fmtUsd(n.borrow)}</b>，每年收 8% 利息`);
-      if (state.side === 'sell' && n.qty > Math.max(0, n.posQty)) lines.push('会借股票来卖，每年收 3% 费用');
-      if (n.posQty) lines.push(`你现在${n.posQty > 0 ? '有' : '卖空了'} <b>${Math.abs(n.posQty)}</b> 股`);
+      if (n.borrow > 0 && !isFx()) lines.push(`其中要借 <b>${fmtUsd(n.borrow)}</b>，每年收 8% 利息`);
+      if (!isFx() && state.side === 'sell' && n.qty > Math.max(0, n.posQty)) lines.push('会借股票来卖，每年收 3% 费用');
+      if (n.posQty) lines.push(`你现在${n.posQty > 0 ? '有' : '卖空了'} <b>${Math.abs(n.posQty)}</b> ${unit()}`);
     } else if (state.side === 'buy') lines.push(`你能用的现金 <b>${fmtUsd(n.cash)}</b>`);
     else lines.push(`你手上有 <b>${n.sellable}</b> 股可以卖`);
   } else {
     if (n.amount != null) lines.push(`预计${state.side === 'buy' ? '花费' : '收入'} <b>${fmtUsd(n.amount)}</b>${state.type === 'market' ? `（含 ${state.account.slippage_bps}bp 滑点）` : ''}`);
     if (isMargin()) {
       if (n.need != null) lines.push(`所需保证金 <b>${fmtUsd(n.need)}</b> / 可用 <b>${fmtUsd(Math.max(0, n.excess))}</b>`);
-      if (n.posQty) lines.push(`当前持仓 <b>${n.posQty > 0 ? `多 ${n.posQty}` : `空 ${-n.posQty}`}</b> 股`);
+      if (n.posQty) lines.push(`当前持仓 <b>${n.posQty > 0 ? `多 ${n.posQty}` : `空 ${-n.posQty}`}</b> ${unit()}`);
     } else if (state.side === 'buy') lines.push(`可用资金 <b>${fmtUsd(n.cash)}</b>`);
     else lines.push(`可卖 <b>${n.sellable}</b> 股`);
   }
 
   let problem = null;
-  if (!state.symbol) problem = T('先在左边选一只股票', '先选择一只股票');
+  if (!state.symbol) problem = isFx() ? '先在左边选一个货币对' : T('先在左边选一只股票', '先选择一只股票');
   else if (state.account?.status === 'bust') problem = T('钱已经亏光了，这局结束', '账户已爆仓');
   else if (state.status?.mode === 'replay' && state.status.status !== 'active') problem = T('这局回放已经结束了', '回放已结束');
   else if (state.type === 'market' && !state.quote) problem = T('暂时拿不到价格', '暂无行情');
   else if (state.type === 'market' && !state.quote.tradable) problem = T(plain(state.quote.reason), `现在不能市价成交：${state.quote.reason}`);
   else if (!Number.isInteger(n.qty) || n.qty <= 0) {
-    problem = amountMode() ? (n.amountInput > 0 ? '钱太少，连 1 股都买不到' : '填一下要花多少钱') : T('填一下股数', '数量必须是正整数');
-  } else if (state.type === 'limit' && !(n.limit > 0)) problem = '请输入限价';
+    problem = isFx() ? '数量必须是 1000 单位（微型手）的正整数倍' : amountMode() ? (n.amountInput > 0 ? '钱太少，连 1 股都买不到' : '填一下要花多少钱') : T('填一下股数', '数量必须是正整数');
+  } else if (isFx() && n.qty % 1000 !== 0) problem = '外汇按 1000 单位（微型手）的整数倍下单';
+  else if (state.type === 'limit' && !(n.limit > 0)) problem = '请输入限价';
   else if (isMargin()) { if (n.need > n.excess) problem = T('押金不够，少买一点吧', '保证金不足'); }
   else if (state.side === 'buy' && n.amount > n.cash) problem = T('钱不够', '可用资金不足');
   else if (state.side === 'sell' && n.qty > n.sellable) {
@@ -659,9 +722,12 @@ function renderTicket() {
   if (problem) lines.push(`<span class="warn">${esc(problem)}</span>`);
   else if (state.type === 'limit' && state.quote && !state.quote.tradable) lines.push('<span class="warn">当前不可成交，挂单将在可交易时检查</span>');
 
-  $('#t-est').innerHTML = lines.join('<br>');
   btn.disabled = !!problem || state.busy;
-  $('#t-note').textContent = state.simple
+  if (isFx() && n.px) lines.push(`每 1000 ${esc(cnName(state.symbol)?.split('/')[0] ?? '基础货币单位')}的仓位，按当前汇价价值 ${fmtUsd(n.px * 1000)}，${state.account.leverage}x 下只需初始保证金 ${fmtUsd(n.px * 1000 / state.account.leverage)}。涨跌按整个仓位算。`);
+  $('#t-est').innerHTML = lines.join('<br>');
+  $('#t-note').textContent = isFx()
+    ? `每 1000 单位 = 1 微型手。滑点约 ${((state.account?.slippage_bps ?? 1) / 100).toFixed(2)}%。不计融资利息、借入费用和隔夜利差。${isReplay() ? '回放使用当前开盘或收盘的价格。' : '交易时段：美东周日 17:00 至周五 17:00。'}`
+    : state.simple
     ? `按现在的价格马上成交，实际价格可能差一点点（约 0.05%）。${isReplay() ? '回放里的价格就是当前这个时刻（开盘或收盘）的价格。' : ''}`
       + (isMargin() ? '借钱每年收 8% 利息，借股票卖空每年收 3% 费用，每天扣一点。' : '')
     : (isReplay() ? '当日有效（DAY）。收盘时下的单属于下一交易日。成交为模拟估算。' : '当日有效（DAY）。成交为模拟估算，不代表真实可成交价格。')
@@ -703,26 +769,26 @@ function confirmHtml(n) {
       : opensShort ? `如果 ${state.symbol} 跌 10%，你大约赚 ${ten}；涨 10%，你大约亏 ${ten}。涨得越多亏得越多，没有上限。`
         : '平掉之后，这部分的赚或亏就定下来了，之后涨跌都跟你无关。';
     return `<div class="confirm-grid">
-      <span>股票</span><span><b>${esc(state.symbol)}</b> ${esc(cnName(state.symbol) ?? '')}</span>
+      <span>${instrument()}</span><span><b>${esc(state.symbol)}</b> ${esc(cnName(state.symbol) ?? '')}</span>
       <span>做什么</span><span class="${state.side === 'buy' ? 'up' : 'down'}"><b>${verb}</b></span>
-      <span>股数</span><span>${n.qty} 股</span>
+      <span>${isFx() ? '单位数' : '股数'}</span><span>${n.qty} ${unit()}${isFx() ? `（${n.qty / 1000} 微型手）` : ''}</span>
       <span>大约金额</span><span>${fmtUsd(amount)}</span>
       ${isMargin() && n.need ? `<span>押上自己的钱</span><span>${fmtUsd(n.need)}</span>` : ''}
-      ${n.borrow > 0 ? `<span>借钱</span><span class="down">${fmtUsd(n.borrow)}</span>` : ''}
+      ${n.borrow > 0 && !isFx() ? `<span>借钱</span><span class="down">${fmtUsd(n.borrow)}</span>` : ''}
     </div>
     <p class="confirm-note">${explain}。</p>
     <p class="confirm-note">${whatIf}</p>`;
   }
   return `<div class="confirm-grid">
-    <span>股票</span><span><b>${esc(state.symbol)}</b></span>
+    <span>${instrument()}</span><span><b>${esc(state.symbol)}</b></span>
     <span>方向</span><span class="${state.side === 'buy' ? 'up' : 'down'}">${SIDE[state.side]}${isMargin() ? `（${actionLabel(state.side, n.qty, n.posQty)}）` : ''}</span>
     <span>类型</span><span>${TYPE[state.type]}${state.type === 'limit' ? ` @ ${fmtPx(n.limit)}` : ''}（当日有效）</span>
-    <span>数量</span><span>${n.qty} 股</span>
+    <span>数量</span><span>${n.qty} ${unit()}</span>
     <span>预计金额</span><span>${fmtUsd(n.amount)}</span>
     ${isMargin() ? `<span>所需保证金</span><span>${fmtUsd(n.need)}</span>` : ''}
     <span>账户</span><span>${esc(accountLabel(state.account))}${isReplay() ? `（${state.account.sim_date} ${PHASE[state.account.sim_phase]}）` : ''}</span>
   </div>${isMargin() && state.side === 'sell' && actionLabel(state.side, n.qty, n.posQty).includes('空')
-    ? '<p class="muted small">做空：股价上涨你亏钱，而且理论上亏损没有上限。</p>' : ''}`;
+    ? `<p class="muted small">做空：${isFx() ? '汇价' : '股价'}上涨你亏钱，而且理论上亏损没有上限。</p>` : ''}`;
 }
 
 async function submitOrder() {
@@ -736,10 +802,10 @@ async function submitOrder() {
   try {
     const o = await api('/api/orders', { method: 'POST', body: JSON.stringify(body) });
     if (o.status === 'filled') {
-      toast(T(`成功！${verb} ${o.qty} 股 ${o.symbol}，价格 ${fmtPx(o.fill_price)}`,
-        `已成交：${SIDE[o.side]} ${o.qty} 股 ${o.symbol} @ ${fmtPx(o.fill_price)}`), 'ok');
+      toast(T(`成功！${verb} ${o.qty} ${unit()} ${o.symbol}，价格 ${fmtPx(o.fill_price)}`,
+        `已成交：${SIDE[o.side]} ${o.qty} ${unit()} ${o.symbol} @ ${fmtPx(o.fill_price)}`), 'ok');
     } else if (o.status === 'open') {
-      toast(`挂单已提交：${SIDE[o.side]} ${o.qty} 股 ${o.symbol} @ ${fmtPx(o.limit_price)}`, 'ok');
+      toast(`挂单已提交：${SIDE[o.side]} ${o.qty} ${unit()} ${o.symbol} @ ${fmtPx(o.limit_price)}`, 'ok');
     } else {
       toast(`${T('没成功：', '订单被拒绝：')}${plain(o.reason)}`, 'error');
     }
@@ -758,7 +824,7 @@ function selectSymbol(sym) {
   if (!sym) return;
   state.symbol = sym;
   state.quote = null;
-  store.set('symbol', sym);
+  store.set(symbolKey(), sym);
   $('#q-price').textContent = '…';
   $('#q-change').textContent = '';
   $('#q-meta').textContent = '';
@@ -774,8 +840,22 @@ async function switchAccount(id) {
   state.accountId = id;
   store.set('accountId', String(id));
   state.portfolio = null;
+  state.status = null;
+  state.quote = null;
+  chartToken += 1;
+  candles.setData([]);
+  volume.setData([]);
   state.companyQuotes = {};
   await loadAccounts();
+  state.symbol = store.get(symbolKey(), isFx() ? 'EURUSD=X' : 'SPY');
+  state.quote = null;
+  $('#q-symbol').textContent = state.symbol;
+  $('#q-price').textContent = '…';
+  $('#q-change').textContent = '';
+  $('#q-meta').textContent = '';
+  $('#q-desc').textContent = '';
+  $('#tab-body').innerHTML = '';
+  renderTicket();
   await refreshAll();
   loadChart();
   if (state.list === 'companies') loadCompanyQuotes(true);
@@ -800,7 +880,7 @@ async function advance(step) {
     if (ev.filled) bits.push(T(`有 ${ev.filled} 个单子成交了`, `成交 ${ev.filled} 笔`));
     if (ev.expired) bits.push(T(`${ev.expired} 个单子没成交，作废了`, `过期 ${ev.expired} 笔`));
     if (ev.financing >= 0.01) bits.push(T(`扣了利息和借股票费用 ${fmtUsd(ev.financing)}`, `利息/融券费 ${fmtUsd(ev.financing)}`));
-    if (ev.liquidated) bits.push(T(`⚠ 亏得太多，系统自动帮你平掉了 ${ev.liquidated} 只股票`, `⚠ 保证金不足，强制平仓 ${ev.liquidated} 个仓位`));
+    if (ev.liquidated) bits.push(T(`⚠ 亏得太多，系统自动帮你平掉了 ${ev.liquidated} ${isFx() ? '个仓位' : '只股票'}`, `⚠ 保证金不足，强制平仓 ${ev.liquidated} 个仓位`));
     if (ev.bust) bits.push(T('钱亏光了，这局结束', '账户爆仓，本局结束'));
     else if (ev.finished) bits.push(T('已经走到今天了，这局结束', '已到达最新数据，回放结束'));
     if (bits.length) toast(bits.join('，'), ev.liquidated || ev.bust ? 'error' : ev.finished ? '' : 'ok');
@@ -824,12 +904,12 @@ $('#search-input').addEventListener('input', (e) => {
   searchTimer = setTimeout(async () => {
     const seq = ++searchSeq;
     try {
-      const results = await api(`/api/market/search?q=${encodeURIComponent(q)}`);
+      const results = await api(`/api/market/search?q=${encodeURIComponent(q)}${isFx() ? '&market=fx' : ''}`);
       if (seq !== searchSeq) return;
       const ul = $('#search-results');
       ul.innerHTML = results.length
         ? results.map((r) => `<li data-symbol="${esc(r.symbol)}"><span class="sym">${esc(r.symbol)}</span><span class="name">${esc(r.name)} · ${esc(r.exchange)}</span></li>`).join('')
-        : `<li class="muted">${T('没找到。试试英文名，或者去"公司列表"里挑', '无结果（可直接回车打开代码）')}</li>`;
+        : `<li class="muted">${isFx() ? '没找到。试试 EUR，或者去"货币对列表"里挑' : T('没找到。试试英文名，或者去"公司列表"里挑', '无结果（可直接回车打开代码）')}</li>`;
       ul.hidden = false;
     } catch { /* ignore search errors */ }
   }, 300);
@@ -915,7 +995,7 @@ $('#type-seg').addEventListener('click', (e) => {
   const b = e.target.closest('button[data-type]');
   if (!b) return;
   state.type = b.dataset.type;
-  if (state.type === 'limit' && !$('#t-limit').value && state.quote) $('#t-limit').value = state.quote.price.toFixed(2);
+  if (state.type === 'limit' && !$('#t-limit').value && state.quote) $('#t-limit').value = state.quote.price.toFixed(isFx() ? 4 : 2);
   renderTicket();
 });
 $('#qty-shortcuts').addEventListener('click', (e) => {
@@ -927,7 +1007,8 @@ $('#qty-shortcuts').addEventListener('click', (e) => {
   if (n.maxQty != null) max = n.maxQty;
   else if (state.side === 'sell') max = n.sellable;
   else if (n.px) max = Math.floor(n.cash / (n.px * (1 + 1e-9)) - 1e-9);
-  const qty = Math.max(0, Math.floor(max * frac));
+  const step = isFx() ? 1000 : 1;
+  const qty = Math.max(0, Math.floor(max * frac / step) * step);
   if (amountMode()) $('#t-amount').value = n.px ? (Math.ceil(qty * n.px * 100) / 100).toFixed(2) : '';
   else $('#t-qty').value = qty;
   renderTicket();
@@ -942,28 +1023,55 @@ $('#replay-controls').addEventListener('click', (e) => {
   if (b) advance(b.dataset.step);
 });
 
+const usLeverageOptions = $('#n-leverage').innerHTML;
 function renderAccountDialog() {
   const replayMode = $('#n-mode').value === 'replay';
-  const margin = $('#n-type').value === 'margin';
+  const fx = $('#n-market').value === 'fx';
+  const margin = fx || $('#n-type').value === 'margin';
+  $('#n-type-wrap').hidden = fx;
+  const leverage = $('#n-leverage');
+  const market = fx ? 'fx' : 'us';
+  if (leverage.dataset.market !== market) {
+    if (leverage.dataset.market) leverage.dataset[leverage.dataset.market] = leverage.value;
+    leverage.innerHTML = fx
+      ? '<option value="10">10 倍（10% 初始保证金）</option><option value="20">20 倍（5% 初始保证金）</option>'
+      : usLeverageOptions;
+    for (const option of leverage.querySelectorAll('option[data-simple]')) {
+      option.dataset.full = option.textContent;
+      option.textContent = T(option.dataset.simple, option.dataset.full);
+    }
+    leverage.value = leverage.dataset[market] ?? (fx ? '20' : '2');
+    leverage.dataset.market = market;
+  }
+  $('#n-mode option[value="live"]').textContent = T(fx
+    ? '实时：用现在的真实价格（美东周日 17:00 至周五 17:00 能买卖）'
+    : '实时：用现在的真实价格（只有美股开市时能买卖）', '实时（交易时段用最新行情）');
+  $('#n-replay-note').textContent = fx
+    ? '回放会归档当前进行中的回放存档。外汇报价表示 1 单位基础货币值多少美元。'
+    : T('开新的回放会把正在玩的那局回放收起来。早年的股价会和你印象里的不一样，因为拆股、分红都已经折算进去了，涨跌比例是对的。', '回放会归档当前进行中的回放存档。价格为复权价格，早年数值会与当时实际报价不同。');
   $('#n-start-wrap').hidden = !replayMode;
+  $('#n-start').min = fx ? '2010-01-04' : '1994-01-01';
   $('#n-replay-note').hidden = !replayMode;
   $('#n-leverage-wrap').hidden = !margin;
   $('#n-margin-note').hidden = !margin;
   if (margin) {
     const lev = Number($('#n-leverage').value);
     const init = 100 / lev;
-    $('#n-margin-note').textContent = T(
+    $('#n-margin-note').textContent = fx ? T(
+      `外汇固定使用杠杆账户。每 $100 的仓位，你只需出 $${init.toFixed(0)}；涨跌按整个仓位算。多空仓位的安全线都是仓位价值的 ${(init / 2).toFixed(1)}%，低于安全线会被自动平仓。不计融资利息和借入费用。`,
+      `外汇 ${lev}x：初始保证金 ${init.toFixed(1)}%，多空维持保证金均为 ${(init / 2).toFixed(1)}%。融资及借入利率为 0。`) : T(
       `买 $100 的股票，你自己出 $${init.toFixed(0)}${lev > 1 ? `，借 $${(100 - init).toFixed(0)}` : ''}。涨跌都按 $100 算，所以赚亏都是普通账户的 ${lev} 倍。亏到你的钱只剩仓位的 ${(init / 2).toFixed(1)}%（卖空是 ${(init * 0.6).toFixed(1)}%）时，系统会自动帮你平仓。借钱每年 8% 利息，卖空每年 3% 费用。`,
       `开仓需自有资金 ${init.toFixed(1)}%；净资产跌破仓位价值的 ${(init / 2).toFixed(1)}%（多头）/ ${(init * 0.6).toFixed(1)}%（空头）会被强制平仓。借款年息 8%，做空年费 3%。`);
   }
 }
-['#n-mode', '#n-type', '#n-leverage'].forEach((s) => $(s).addEventListener('change', renderAccountDialog));
+['#n-mode', '#n-market', '#n-type', '#n-leverage'].forEach((s) => $(s).addEventListener('change', renderAccountDialog));
 
 $('#new-account-btn').addEventListener('click', async () => {
   renderAccountDialog();
   if (!(await openDialog($('#account-dialog')))) return;
   const body = {
-    mode: $('#n-mode').value, account_type: $('#n-type').value,
+    mode: $('#n-mode').value, market: $('#n-market').value,
+    account_type: $('#n-market').value === 'fx' ? 'margin' : $('#n-type').value,
     leverage: Number($('#n-leverage').value), initial: Number($('#n-initial').value) || 100000,
   };
   if (body.mode === 'replay' && $('#n-start').value) body.start_date = $('#n-start').value;
@@ -987,7 +1095,7 @@ $('#archive-btn').addEventListener('click', async () => {
   } catch (e) { toast(e.message, 'error'); }
 });
 $('#reset-btn').addEventListener('click', async () => {
-  if (!confirm(T(`把「${accountLabel(state.account)}」重新开始？所有股票和买卖记录都会清空，钱恢复成一开始的数。`,
+  if (!confirm(T(`把「${accountLabel(state.account)}」重新开始？所有${isFx() ? '仓位' : '股票'}和买卖记录都会清空，钱恢复成一开始的数。`,
     `重置「${accountLabel(state.account)}」？所有订单、成交和持仓将被清除，资金恢复初始值。`))) return;
   try {
     await api(withAcct('/api/account/reset'), { method: 'POST' });
@@ -1017,7 +1125,7 @@ setInterval(async () => {
     toast(`无法连接本地服务：${e.message}`, 'error');
     return;
   }
-  state.symbol = store.get('symbol', 'SPY');
+  state.symbol = store.get(symbolKey(), isFx() ? 'EURUSD=X' : 'SPY');
   await refreshAll();
   selectSymbol(state.symbol);
   showList(store.get('list', 'watch') === 'companies' ? 'companies' : 'watch');

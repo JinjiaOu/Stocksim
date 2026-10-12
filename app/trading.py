@@ -44,18 +44,40 @@ def margin_params(leverage: float) -> dict:
     return {"initial_margin_bps": initial, "maint_long_bps": initial // 2, "maint_short_bps": initial * 6 // 10}
 
 
+# Forex accounts: always margin, symmetric maintenance, ~1 pip spread, no financing (overnight swap is out of scope).
+FX_LEVERAGES = (10, 20)
+FX_DEFAULTS = {"slippage_bps": 1, "margin_rate_bps": 0, "borrow_rate_bps": 0}
+FX_LOT = 1000  # orders are whole micro lots
+# v1: USD-quoted majors only, so price × units is already in dollars and 4 decimals is one pip.
+FX_PAIRS = ("EURUSD=X", "GBPUSD=X", "AUDUSD=X", "NZDUSD=X")
+
+
+def symbol_market(symbol: str) -> str:
+    return "fx" if symbol.endswith("=X") else "us"
+
+
 def create_account(conn, mode, name, initial_cents, now: datetime, account_type="cash", leverage=1.0,
-                   start_date=None, sim_date=None, sim_phase=None, accrued_through=None) -> int:
-    params = margin_params(leverage) if account_type == "margin" else margin_params(1) | {
-        "maint_long_bps": 0, "maint_short_bps": 0}
+                   start_date=None, sim_date=None, sim_phase=None, accrued_through=None, market="us") -> int:
+    if market == "fx":
+        if leverage not in FX_LEVERAGES:
+            raise TradeError("外汇账户杠杆只能是 10x 或 20x")
+        account_type = "margin"
+        params = margin_params(leverage)
+        params["maint_short_bps"] = params["maint_long_bps"]
+        extra = FX_DEFAULTS
+    else:
+        params = margin_params(leverage) if account_type == "margin" else margin_params(1) | {
+            "maint_long_bps": 0, "maint_short_bps": 0}
+        extra = {}
+    cols = ("mode", "account_type", "market", "name", "initial_cents", "cash_cents", "initial_margin_bps",
+            "maint_long_bps", "maint_short_bps", "accrued_through", "start_date", "sim_date", "sim_phase",
+            "created_at", *extra)
+    values = (mode, account_type, market, name, initial_cents, initial_cents, params["initial_margin_bps"],
+              params["maint_long_bps"], params["maint_short_bps"], accrued_through, start_date, sim_date,
+              sim_phase, iso(now), *extra.values())
     with db.tx(conn):
-        cur = conn.execute(
-            "INSERT INTO accounts (mode, account_type, name, initial_cents, cash_cents, initial_margin_bps,"
-            " maint_long_bps, maint_short_bps, accrued_through, start_date, sim_date, sim_phase, created_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (mode, account_type, name, initial_cents, initial_cents, params["initial_margin_bps"],
-             params["maint_long_bps"], params["maint_short_bps"], accrued_through, start_date, sim_date,
-             sim_phase, iso(now)))
+        cur = conn.execute(f"INSERT INTO accounts ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
+                           values)
         account_id = cur.lastrowid
         _ledger(conn, account_id, initial_cents, "deposit", None, now)
         return account_id
@@ -149,6 +171,13 @@ def place_order(conn, account_id: int, symbol: str, side: str, otype: str, qty: 
         acct = get_account(conn, account_id)
         if acct["status"] != "active":
             raise TradeError("该存档已结束，不能下单")
+        if symbol_market(symbol) != acct["market"]:
+            raise TradeError("该账户不能交易此品种")
+        if acct["market"] == "fx":
+            if symbol not in FX_PAIRS:
+                raise TradeError("目前只支持 EURUSD、GBPUSD、AUDUSD、NZDUSD 四个货币对")
+            if qty % FX_LOT:
+                raise TradeError("外汇按 1000 单位（微型手）的整数倍下单")
 
         def insert(status, reason=None, reserved=0):
             cur = conn.execute(
@@ -160,7 +189,7 @@ def place_order(conn, account_id: int, symbol: str, side: str, otype: str, qty: 
 
         tradable = quote is not None and quote.tradable
         if otype == "market" and not tradable:
-            return insert("rejected", quote.reason if quote else "暂无该股票行情")
+            return insert("rejected", quote.reason if quote else "暂无该品种行情")
 
         bps, fee = acct["slippage_bps"], acct["commission_cents"]
         price4 = None
