@@ -3,7 +3,12 @@
 Each replay account has a simulated position in time: (sim_date, phase), phase being the
 open or the close of that trading day. Quotes are that bar's open or close; nothing after
 the current point is ever exposed. Prices are split/dividend-adjusted, so corporate actions
-need no separate handling. The trading calendar is SPY's daily bar dates.
+need no separate handling. The trading calendar is SPY's daily bar dates for stock games and
+EURUSD's for forex games (forex trades through US holidays).
+
+Yahoo's daily forex bars carry occasional bad prints (e.g. a 73% high/low range on 2012-01-27).
+At 20x leverage one of those would bust the player, so fx bars are sanitized on download and
+fx games start no earlier than 2010, before which closes are unreliable too.
 """
 import random
 from datetime import date, datetime, timedelta, timezone
@@ -11,11 +16,14 @@ from datetime import date, datetime, timedelta, timezone
 from . import db
 from .market import CLOSE_T, ET, OPEN_T, MarketDataProvider
 from .models import Quote, iso, to_price4, utcnow
-from .trading import (TradeError, accrue_financing, create_account, enforce_maintenance, expire_orders,
+from .trading import (TradeError, symbol_market, accrue_financing, create_account, enforce_maintenance, expire_orders,
                       get_account, held_symbols, match_intraday, match_open_orders, open_orders)
 
-CALENDAR = "SPY"
+CALENDAR = "SPY"              # stock games
+FX_CALENDAR = "EURUSD=X"      # forex games
 EARLIEST_START = "2000-01-03"
+FX_EARLIEST_START = "2010-01-04"
+FX_MAX_MOVE = 0.05            # fx open gaps / intraday extremes beyond 5% of the reference are treated as bad prints
 MIN_RUNWAY_DAYS = 252  # random starts leave at least a year of history to play
 STEPS = {"half": 1, "day": 2, "week": 10, "month": 42}
 
@@ -36,6 +44,8 @@ def ensure_daily(conn, provider: MarketDataProvider, symbol: str, need_through: 
         return meta is not None
     rows = [(symbol, ts.date().isoformat(), to_price4(r.Open), to_price4(r.High), to_price4(r.Low),
              to_price4(r.Close), int(r.Volume)) for ts, r in zip(df.index, df.itertuples())]
+    if symbol_market(symbol) == "fx":
+        rows = _sanitize_fx(rows)
     with db.tx(conn):
         conn.execute("DELETE FROM daily_bars WHERE symbol = ?", (symbol,))
         conn.executemany("INSERT INTO daily_bars VALUES (?, ?, ?, ?, ?, ?, ?)", rows)
@@ -44,24 +54,44 @@ def ensure_daily(conn, provider: MarketDataProvider, symbol: str, need_through: 
     return True
 
 
+def _sanitize_fx(rows: list[tuple]) -> list[tuple]:
+    """Replace an open that gaps >5% from the previous close with that close; clamp high/low to 5% beyond the body."""
+    out, prev_close = [], None
+    for sym, d, o, h, l, c, v in rows:
+        if prev_close and abs(o / prev_close - 1) > FX_MAX_MOVE:
+            o = prev_close
+        top, bottom = max(o, c), min(o, c)
+        h = max(top, min(h, int(top * (1 + FX_MAX_MOVE))))
+        l = min(bottom, max(l, int(bottom * (1 - FX_MAX_MOVE))))
+        out.append((sym, d, o, h, l, c, v))
+        prev_close = c
+    return out
+
+
+def calendar_of(market: str) -> str:
+    return FX_CALENDAR if market == "fx" else CALENDAR
+
+
 def new_game(conn, provider: MarketDataProvider, initial_cents: int, start_date: str | None = None,
              rng: random.Random | None = None, account_type: str = "cash", leverage: float = 1.0,
              market: str = "us") -> int:
-    if not ensure_daily(conn, provider, CALENDAR):
-        raise TradeError("无法获取交易日历（SPY 历史数据）", 503)
-    dates = [r["date"] for r in conn.execute("SELECT date FROM daily_bars WHERE symbol = ? ORDER BY date",
-                                             (CALENDAR,))]
+    calendar = calendar_of(market)
+    earliest = FX_EARLIEST_START if market == "fx" else EARLIEST_START
+    if not ensure_daily(conn, provider, calendar):
+        raise TradeError(f"无法获取交易日历（{calendar} 历史数据）", 503)
+    dates = [r["date"] for r in conn.execute("SELECT date FROM daily_bars WHERE symbol = ? AND date >= ? ORDER BY date",
+                                             (calendar, earliest))]
     if start_date:
         candidates = [d for d in dates[:-1] if d >= start_date]
         if not candidates:
             raise TradeError("开始日期太晚，没有可回放的历史数据")
         start = candidates[0]
     else:
-        pool = [d for d in dates[:-MIN_RUNWAY_DAYS] if d >= EARLIEST_START]
+        pool = dates[:-MIN_RUNWAY_DAYS]
         start = (rng or random).choice(pool)
     with db.tx(conn):
         conn.execute("UPDATE accounts SET status = 'archived' WHERE mode = 'replay' AND status != 'archived'")
-        return create_account(conn, "replay", f"回放 {start}", initial_cents, utcnow(), account_type=account_type,
+        return create_account(conn, "replay", f"{'外汇回放' if market == 'fx' else '回放'} {start}", initial_cents, utcnow(), account_type=account_type,
                               leverage=leverage, start_date=start, sim_date=start, sim_phase="open",
                               accrued_through=start, market=market)
 
@@ -75,8 +105,9 @@ def now_of(acct) -> datetime:
     return sim_time(acct["sim_date"], acct["sim_phase"])
 
 
-def next_trading_date(conn, d: str) -> str | None:
-    row = conn.execute("SELECT MIN(date) AS d FROM daily_bars WHERE symbol = ? AND date > ?", (CALENDAR, d)).fetchone()
+def next_trading_date(conn, acct, d: str) -> str | None:
+    row = conn.execute("SELECT MIN(date) AS d FROM daily_bars WHERE symbol = ? AND date > ?",
+                       (calendar_of(acct["market"]), d)).fetchone()
     return row["d"]
 
 
@@ -84,7 +115,7 @@ def session_date(conn, acct) -> str:
     """Orders placed at the open belong to today's session; at the close, to the next one."""
     if acct["sim_phase"] == "open":
         return acct["sim_date"]
-    return next_trading_date(conn, acct["sim_date"]) or acct["sim_date"]
+    return next_trading_date(conn, acct, acct["sim_date"]) or acct["sim_date"]
 
 
 def _bar(conn, symbol: str, d: str):
@@ -99,7 +130,7 @@ def quote(conn, acct, symbol: str) -> Quote | None:
         last = mark(conn, acct, symbol)
         if last is None:
             return None
-        return Quote(symbol, last.price4, last.as_of, "replay", tradable=False, reason="该股票当日无行情（未上市或停牌）")
+        return Quote(symbol, last.price4, last.as_of, "replay", tradable=False, reason="该品种当日无行情（未上市或停牌）")
     if acct["status"] != "active":
         return Quote(symbol, bar["close4"], when, "replay", tradable=False, reason="回放已结束")
     price = bar["open4"] if acct["sim_phase"] == "open" else bar["close4"]
@@ -169,7 +200,7 @@ def advance(conn, account_id: int, half_steps: int) -> dict:
                 conn.execute("UPDATE accounts SET sim_phase = 'close' WHERE id = ?", (account_id,))
             _check_margin(conn, account_id, events)
         else:
-            nxt = next_trading_date(conn, d)
+            nxt = next_trading_date(conn, acct, d)
             if nxt is None:
                 with db.tx(conn):
                     conn.execute("UPDATE accounts SET status = 'finished' WHERE id = ?", (account_id,))
