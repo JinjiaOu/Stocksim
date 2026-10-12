@@ -327,13 +327,15 @@ def list_fills(account_id: int | None = None, limit: int = Query(200, le=1000), 
 def get_portfolio(account_id: int | None = None, conn=Depends(get_conn)):
     acct = account_of(conn, account_id)
     out = trading.portfolio(conn, acct["id"], marks_for(conn, acct, trading.held_symbols(conn, acct["id"])))
-    out["benchmark_return"] = None
-    if acct["mode"] == "replay":  # buy-and-hold SPY from the game's first open
+    out["benchmark_return"] = out["benchmark_name"] = None
+    if acct["mode"] == "replay" and acct["market"] == "fx":  # forex: the alternative is keeping the dollars
+        out["benchmark_return"], out["benchmark_name"] = 0.0, "USD 现金"
+    elif acct["mode"] == "replay":  # buy-and-hold SPY from the game's first open
         start = conn.execute("SELECT open4 FROM daily_bars WHERE symbol = ? AND date = ?",
                              (replay.CALENDAR, acct["start_date"])).fetchone()
         now_mark = replay.mark(conn, acct, replay.CALENDAR)
         if start and now_mark:
-            out["benchmark_return"] = now_mark.price4 / start["open4"] - 1
+            out["benchmark_return"], out["benchmark_name"] = now_mark.price4 / start["open4"] - 1, "SPY"
     return out
 
 
