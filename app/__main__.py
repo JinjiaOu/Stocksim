@@ -10,6 +10,8 @@ import webbrowser
 
 import uvicorn
 
+from app import db, main as server
+
 HOST, PORT = "127.0.0.1", 8765
 URL = f"http://{HOST}:{PORT}/"
 
@@ -23,12 +25,20 @@ def already_running() -> bool:
 if __name__ == "__main__":
     browser = "--no-browser" not in sys.argv
     if already_running():
-        print(f"StockSim 已在运行：{URL}")
+        if sys.stdout:
+            print(f"StockSim 已在运行：{URL}")
         if browser:
             webbrowser.open(URL)
         sys.exit(0)
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    print(f"StockSim 运行中：{URL}  （关闭此窗口即退出）")
+    frozen = getattr(sys, "frozen", False)
+    fmt = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+    if frozen:  # windowed exe has no console: log to a file next to the exe
+        db.APP_ROOT.mkdir(parents=True, exist_ok=True)
+        logging.basicConfig(level=logging.INFO, format=fmt, filename=db.APP_ROOT / "stocksim.log", encoding="utf-8")
+        server.watch_idle = True
+    else:
+        logging.basicConfig(level=logging.INFO, format=fmt)
+        print(f"StockSim 运行中：{URL}  （关闭此窗口即退出）")
     if browser:
         threading.Timer(1.5, webbrowser.open, (URL,)).start()
-    uvicorn.run("app.main:app", host=HOST, port=PORT, log_level="warning")
+    uvicorn.run(server.app, host=HOST, port=PORT, log_level="warning", log_config=None)

@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="favicon.png">
   <title>StockSim</title>
   <link rel="stylesheet" href="style.css">
   <script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
@@ -25,6 +26,7 @@
   <a href="guide.html"><button class="ghost">新手指南</button></a>
   <button id="new-account-btn" class="ghost" data-simple="开新的一局">新建存档</button>
   <button id="reset-btn" class="ghost danger" data-simple="重新开始">重置账户</button>
+  <button id="quit-btn" class="ghost" hidden title="关闭程序">退出程序</button>
   <button id="archive-btn" class="ghost danger" hidden data-simple="收起这个存档">归档</button>
 </header>
 <div id="margin-banner" class="banner" hidden></div>
@@ -154,6 +156,7 @@
 </dialog>
 
 <div id="toast" class="toast" hidden></div>
+<script src="ping.js"></script>
 <script type="module" src="app.js"></script>
 </body>
 </html>

@@ -1022,3 +1022,15 @@ setInterval(async () => {
   selectSymbol(state.symbol);
   showList(store.get('list', 'watch') === 'companies' ? 'companies' : 'watch');
 })();
+
+// Packaged exe only: offer a quit button (the server exits when the last tab closes anyway).
+fetch('/api/ping', { method: 'POST' }).then((r) => r.json()).then((d) => {
+  if (!d.exe) return;
+  const btn = $('#quit-btn');
+  btn.hidden = false;
+  btn.addEventListener('click', async () => {
+    if (!confirm('确定退出程序吗？存档已自动保存。')) return;
+    await fetch('/api/quit', { method: 'POST' }).catch(() => {});
+    document.body.innerHTML = '<p style="padding:2rem">StockSim 已退出，可以关闭此页面。</p>';
+  });
+}).catch(() => {});

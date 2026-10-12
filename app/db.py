@@ -1,9 +1,12 @@
 import os
 import sqlite3
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 
-DB_PATH = Path(os.environ.get("STOCKSIM_DB") or Path(__file__).resolve().parent.parent / "data" / "stocksim.db")
+# Packaged exe: keep saves next to the exe (the bundle itself is unpacked to a temp dir and discarded on exit).
+APP_ROOT = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent.parent
+DB_PATH = Path(os.environ.get("STOCKSIM_DB") or APP_ROOT / "data" / "stocksim.db")
 LIVE_INITIAL_CENTS = 100_000_00
 SCHEMA_VERSION = 1
 

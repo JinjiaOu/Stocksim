@@ -1,5 +1,9 @@
 import asyncio
 import logging
+import os
+import sys
+import threading
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -14,7 +18,18 @@ from .models import utcnow
 
 log = logging.getLogger("stocksim")
 LOOP_SECONDS = 30
-WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+WEB_DIR = (Path(getattr(sys, "_MEIPASS", "")) if getattr(sys, "frozen", False) else Path(__file__).resolve().parent.parent) / "web"
+IDLE_EXIT_SECONDS = 180  # browsers throttle background tabs to ~1 timer/min, so stay well above that
+last_ping = time.monotonic()
+watch_idle = False  # set by the exe launcher: quit when no browser tab has pinged for a while
+
+
+async def idle_watchdog() -> None:
+    while True:
+        await asyncio.sleep(5)
+        if watch_idle and time.monotonic() - last_ping > IDLE_EXIT_SECONDS:
+            log.info("no browser connected, exiting")
+            os._exit(0)
 
 
 def live_tick() -> None:
@@ -59,12 +74,28 @@ async def lifespan(app: FastAPI):
     db.init(conn)
     conn.close()
     task = asyncio.create_task(matcher_loop())
+    watchdog = asyncio.create_task(idle_watchdog())
     yield
     task.cancel()
+    watchdog.cancel()
 
 
 app = FastAPI(title="StockSim", lifespan=lifespan)
 app.include_router(router)
+
+
+@app.post("/api/ping", include_in_schema=False)
+def ping():
+    global last_ping
+    last_ping = time.monotonic()
+    return {"ok": True, "exe": watch_idle}
+
+
+@app.post("/api/quit", include_in_schema=False)
+def quit_app():
+    if watch_idle:  # only the packaged exe; never kill a dev server from the page
+        threading.Timer(0.3, os._exit, (0,)).start()
+    return {"ok": watch_idle}
 
 if WEB_DIR.is_dir():
     app.mount("/web", StaticFiles(directory=WEB_DIR, html=True), name="web")
