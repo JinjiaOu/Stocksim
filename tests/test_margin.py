@@ -264,7 +264,7 @@ def test_migrates_v0_database(tmp_path):
     old.close()
     c = db.connect(path)
     db.init(c)
-    assert c.execute("PRAGMA user_version").fetchone()[0] == 1
+    assert c.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
     a = trading.get_account(c, 1)
     assert (a["account_type"], a["cash_cents"], a["initial_margin_bps"]) == ("cash", 9_000_000, 10000)
     assert pos(c, 1, "AAPL")["qty"] == 50

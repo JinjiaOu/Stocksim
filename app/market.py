@@ -17,6 +17,8 @@ OPEN_T, CLOSE_T = dtime(9, 30), dtime(16, 0)
 QUOTE_TTL = 30          # seconds a fetched quote is reused
 STALE_SECONDS = 180     # quotes older than this are not tradable
 JUMP_LIMIT = 0.30       # a >30% move between consecutive quotes pauses matching for that quote
+FX_ROLL_T = dtime(17, 0)  # forex week runs Sunday 17:00 to Friday 17:00 ET; each trading day rolls at 17:00
+FX_STALE_SECONDS = 300    # AUD/NZD 1m data actually arrives as 2-minute bars
 US_EXCHANGES = {"NMS", "NYQ", "NGM", "NCM", "ASE", "PCX", "BTS", "NAS", "NYS", "CXI"}
 
 
@@ -67,7 +69,9 @@ class YFinanceProvider(MarketDataProvider):
             if sub.empty:
                 continue
             # A 1m bar is stamped with its start time; the close price is known at its end.
-            as_of = sub.index[-1].to_pydatetime().astimezone(timezone.utc) + timedelta(minutes=1)
+            # The last bar may still be forming (forex 1m data includes it), so never stamp it in the future.
+            as_of = min(sub.index[-1].to_pydatetime().astimezone(timezone.utc) + timedelta(minutes=1),
+                        datetime.now(timezone.utc))
             out[s] = Quote(s, to_price4(sub["Close"].iloc[-1]), as_of, "yfinance:1m")
         return out
 
@@ -118,7 +122,7 @@ class YFinanceProvider(MarketDataProvider):
             return None if df.empty else df
         return self._cached(("1d", symbol, period), 900, fetch)
 
-    def search(self, q):
+    def search(self, q, market="us"):
         def fetch():
             try:
                 quotes = yf.Search(q, max_results=15, news_count=0).quotes
@@ -127,9 +131,8 @@ class YFinanceProvider(MarketDataProvider):
                 return []
             return [{"symbol": r["symbol"], "name": r.get("shortname") or r.get("longname") or "",
                      "exchange": r.get("exchDisp", ""), "type": r.get("quoteType", "")}
-                    for r in quotes
-                    if r.get("quoteType") in ("EQUITY", "ETF") and r.get("exchange") in US_EXCHANGES]
-        return self._cached(("search", q.lower()), 3600, fetch)
+                    for r in quotes if _searchable(r, market)]
+        return self._cached(("search", market, q.lower()), 3600, fetch)
 
     def _cached(self, key, ttl, fn):
         now = time.monotonic()
@@ -141,6 +144,13 @@ class YFinanceProvider(MarketDataProvider):
         with self._lock:
             self._bars[key] = (now, value)
         return value
+
+
+def _searchable(r: dict, market: str) -> bool:
+    if market == "fx":
+        from .trading import FX_PAIRS  # deferred: trading is pure engine code and imports nothing from here
+        return r.get("quoteType") == "CURRENCY" and r["symbol"] in FX_PAIRS
+    return r.get("quoteType") in ("EQUITY", "ETF") and r.get("exchange") in US_EXCHANGES
 
 
 def _bars_json(df: pd.DataFrame) -> list[dict]:
@@ -170,10 +180,32 @@ def session_date(now: datetime) -> date:
     return d
 
 
+def in_fx_hours(now: datetime) -> bool:
+    et = now.astimezone(ET)
+    wd, t = et.weekday(), et.time()
+    if wd == 5:
+        return False
+    if wd == 4:
+        return t < FX_ROLL_T
+    if wd == 6:
+        return t >= FX_ROLL_T
+    return True
+
+
+def fx_session_date(now: datetime) -> date:
+    """The forex trading day `now` belongs to: days roll at 17:00 ET, weekend time belongs to Monday."""
+    et = now.astimezone(ET)
+    d = et.date() + timedelta(days=1 if et.time() >= FX_ROLL_T else 0)
+    while d.weekday() >= 5:
+        d += timedelta(days=1)
+    return d
+
+
 class LiveMarket:
-    """Turns raw provider quotes into tradable/untradable quotes for the live account."""
+    """Turns raw provider quotes into tradable/untradable quotes for live US stock accounts."""
 
     BENCH = "SPY"
+    STALE = STALE_SECONDS
 
     def __init__(self, provider: MarketDataProvider):
         self.provider = provider
@@ -183,7 +215,10 @@ class LiveMarket:
     def status(self, now: datetime) -> dict:
         is_open, reason = self._open(now, self.provider.quotes([self.BENCH]).get(self.BENCH))
         return {"mode": "live", "open": is_open, "reason": reason, "now": now.isoformat(timespec="seconds"),
-                "session_date": session_date(now).isoformat()}
+                "session_date": self.session_date(now).isoformat()}
+
+    def session_date(self, now: datetime) -> date:
+        return session_date(now)
 
     def quotes(self, symbols: list[str], now: datetime) -> dict[str, Quote]:
         raw = self.provider.quotes(sorted(set(symbols) | {self.BENCH}))
@@ -196,7 +231,7 @@ class LiveMarket:
             jumped = self._jumped(q)
             if not is_open:
                 reason = closed_reason
-            elif (now - q.as_of).total_seconds() > STALE_SECONDS:
+            elif (now - q.as_of).total_seconds() > self.STALE:
                 reason = "行情过期"
             elif jumped:
                 reason = "价格异常跳变，暂停撮合"
@@ -222,3 +257,23 @@ class LiveMarket:
             jumped = bool(prev) and abs(q.price4 / prev[1] - 1) > JUMP_LIMIT
             self._seen[q.symbol] = (q.as_of, q.price4, jumped)
             return jumped
+
+
+class FxLiveMarket(LiveMarket):
+    """Live forex accounts: open 24×5, with EURUSD freshness standing in for SPY's."""
+
+    BENCH = "EURUSD=X"
+    STALE = FX_STALE_SECONDS
+
+    def session_date(self, now):
+        return fx_session_date(now)
+
+    def _open(self, now, bench):
+        if not in_fx_hours(now):
+            return False, "外汇市场休市（周五 17:00 至周日 17:00 ET）"
+        # Ten minutes into the week with no fresh EURUSD prints: holiday (Christmas/New Year) or data outage.
+        et = now.astimezone(ET)
+        week_open = et.weekday() == 6 and et.time() < dtime(17, 10)
+        if not week_open and (bench is None or (now - bench.as_of).total_seconds() > 600):
+            return False, "无最新行情（可能为外汇假日或数据源异常）"
+        return True, None

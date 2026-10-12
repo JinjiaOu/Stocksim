@@ -6,15 +6,20 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from . import db, replay, trading
-from .market import ET, LiveMarket, YFinanceProvider, session_date
+from .market import ET, FxLiveMarket, LiveMarket, YFinanceProvider
 from .models import iso, to_price4, utcnow
 from .trading import TradeError
 
 router = APIRouter(prefix="/api")
 provider = YFinanceProvider()
 live = LiveMarket(provider)
+live_fx = FxLiveMarket(provider)
 
-SYMBOL_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,11}$")
+
+def live_of(acct) -> LiveMarket:
+    return live_fx if acct["market"] == "fx" else live
+
+SYMBOL_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,11}(=X)?$")  # =X: Yahoo currency pairs
 
 
 def get_conn():
@@ -28,7 +33,7 @@ def get_conn():
 def symbol_of(raw: str) -> str:
     s = raw.strip().upper()
     if not SYMBOL_RE.match(s):
-        raise HTTPException(400, "无效的股票代码")
+        raise HTTPException(400, "无效的代码")
     return s
 
 
@@ -58,14 +63,15 @@ def prev_close(conn, acct, q) -> float | None:
                            (q.symbol, acct["sim_date"])).fetchone()
         return row["close4"] / 1e4 if row else None
     closes = provider.daily_closes([q.symbol])[q.symbol]  # served from cache when pre-fetched in batch
-    day = q.as_of.astimezone(ET).date()
+    # Forex days roll at 17:00 ET, so a Monday-evening quote already belongs to Tuesday.
+    day = live_fx.session_date(q.as_of) if acct["market"] == "fx" else q.as_of.astimezone(ET).date()
     before = [d for d in closes if d < day]
     return closes[max(before)] if before else None
 
 
 def live_quotes_json(conn, acct, symbols):
     now = utcnow()
-    quotes = live.quotes(symbols, now) if symbols else {}
+    quotes = live_of(acct).quotes(symbols, now) if symbols else {}
     provider.daily_closes(symbols)
     return {s: quote_json(q, now, prev_close(conn, acct, q)) for s in symbols if (q := quotes.get(s))}
 
@@ -76,7 +82,7 @@ def replay_ready(conn, acct, symbol):
 
 
 def account_json(a):
-    return {k: a[k] for k in ("id", "mode", "account_type", "status", "name", "start_date", "sim_date", "sim_phase",
+    return {k: a[k] for k in ("id", "mode", "account_type", "market", "status", "name", "start_date", "sim_date", "sim_phase",
                               "created_at")} | {
         "initial": a["initial_cents"] / 100, "slippage_bps": a["slippage_bps"], "commission": a["commission_cents"] / 100,
         "leverage": round(10000 / a["initial_margin_bps"], 2), "maint_long_bps": a["maint_long_bps"],
@@ -98,7 +104,8 @@ def list_accounts(conn=Depends(get_conn)):
 class NewAccount(BaseModel):
     mode: Literal["live", "replay"] = "replay"
     account_type: Literal["cash", "margin"] = "cash"
-    leverage: Literal[1, 2, 4] = 2
+    market: Literal["us", "fx"] = "us"
+    leverage: Literal[1, 2, 4, 10, 20] | None = None  # us margin: 1/2/4 (default 2); fx: 10/20 (default 20)
     start_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     initial: Decimal = Field(default=Decimal(100_000), ge=Decimal(1000), le=Decimal(1_000_000_000))
 
@@ -106,15 +113,26 @@ class NewAccount(BaseModel):
 @router.post("/accounts")
 def new_account(body: NewAccount, conn=Depends(get_conn)):
     initial = int(body.initial * 100)
-    leverage = body.leverage if body.account_type == "margin" else 1
+    if body.market == "fx":
+        account_type, leverage = "margin", body.leverage or 20
+        if leverage not in trading.FX_LEVERAGES:
+            raise HTTPException(422, "外汇账户杠杆只能是 10x 或 20x")
+    else:
+        account_type = body.account_type
+        leverage = (body.leverage or 2) if account_type == "margin" else 1
+        if leverage not in (1, 2, 4):
+            raise HTTPException(422, "股票保证金账户杠杆只能是 1x、2x 或 4x")
     try:
         if body.mode == "replay":
-            account_id = replay.new_game(conn, provider, initial, body.start_date, account_type=body.account_type,
-                                         leverage=leverage)
+            account_id = replay.new_game(conn, provider, initial, body.start_date, account_type=account_type,
+                                         leverage=leverage, market=body.market)
         else:
-            label = "实时 · 现金" if body.account_type == "cash" else f"实时 · 保证金 {leverage}x"
-            account_id = trading.create_account(conn, "live", label, initial, utcnow(), account_type=body.account_type,
-                                                leverage=leverage, accrued_through=et_today())
+            if body.market == "fx":
+                label = f"实时 · 外汇 {leverage}x"
+            else:
+                label = "实时 · 现金" if account_type == "cash" else f"实时 · 保证金 {leverage}x"
+            account_id = trading.create_account(conn, "live", label, initial, utcnow(), account_type=account_type,
+                                                leverage=leverage, accrued_through=et_today(), market=body.market)
     except TradeError as e:
         raise HTTPException(e.status, str(e))
     return account_json(trading.get_account(conn, account_id))
@@ -169,7 +187,7 @@ def advance_replay(body: Advance, conn=Depends(get_conn)):
 def market_status(account_id: int | None = None, conn=Depends(get_conn)):
     acct = account_of(conn, account_id)
     if acct["mode"] == "live":
-        return live.status(utcnow())
+        return live_of(acct).status(utcnow())
     return {"mode": "replay", "open": acct["status"] == "active", "status": acct["status"],
             "reason": None if acct["status"] == "active" else "回放已结束",
             "now": iso(replay.now_of(acct)), "sim_date": acct["sim_date"], "sim_phase": acct["sim_phase"],
@@ -177,8 +195,8 @@ def market_status(account_id: int | None = None, conn=Depends(get_conn)):
 
 
 @router.get("/market/search")
-def search(q: str = Query(min_length=1, max_length=40)):
-    return provider.search(q.strip())
+def search(q: str = Query(min_length=1, max_length=40), market: Literal["us", "fx"] = "us"):
+    return provider.search(q.strip(), market)
 
 
 @router.get("/market/quotes")
@@ -199,7 +217,7 @@ def get_quote(symbol: str, account_id: int | None = None, conn=Depends(get_conn)
     acct = account_of(conn, account_id)
     if acct["mode"] == "live":
         now = utcnow()
-        q = live.quotes([s], now).get(s)
+        q = live_of(acct).quotes([s], now).get(s)
     else:
         replay_ready(conn, acct, s)
         now, q = None, replay.quote(conn, acct, s)
@@ -251,7 +269,7 @@ def marks_for(conn, acct, symbols) -> dict:
     if not symbols:
         return {}
     if acct["mode"] == "live":
-        return live.quotes(list(symbols), utcnow())
+        return live_of(acct).quotes(list(symbols), utcnow())
     return {s: replay.mark(conn, acct, s) for s in symbols}
 
 
@@ -261,8 +279,8 @@ def place_order(body: OrderIn, conn=Depends(get_conn)):
     acct = account_of(conn, body.account_id)
     if acct["mode"] == "live":
         now = utcnow()
-        q = live.quotes([s], now).get(s)
-        trade_date = session_date(now).isoformat()
+        q = live_of(acct).quotes([s], now).get(s)
+        trade_date = live_of(acct).session_date(now).isoformat()
     else:
         replay_ready(conn, acct, s)
         now, q = replay.now_of(acct), replay.quote(conn, acct, s)
@@ -315,13 +333,15 @@ def list_fills(account_id: int | None = None, limit: int = Query(200, le=1000), 
 def get_portfolio(account_id: int | None = None, conn=Depends(get_conn)):
     acct = account_of(conn, account_id)
     out = trading.portfolio(conn, acct["id"], marks_for(conn, acct, trading.held_symbols(conn, acct["id"])))
-    out["benchmark_return"] = None
-    if acct["mode"] == "replay":  # buy-and-hold SPY from the game's first open
+    out["benchmark_return"] = out["benchmark_name"] = None
+    if acct["mode"] == "replay" and acct["market"] == "fx":  # forex: the alternative is keeping the dollars
+        out["benchmark_return"], out["benchmark_name"] = 0.0, "USD 现金"
+    elif acct["mode"] == "replay":  # buy-and-hold SPY from the game's first open
         start = conn.execute("SELECT open4 FROM daily_bars WHERE symbol = ? AND date = ?",
                              (replay.CALENDAR, acct["start_date"])).fetchone()
         now_mark = replay.mark(conn, acct, replay.CALENDAR)
         if start and now_mark:
-            out["benchmark_return"] = now_mark.price4 / start["open4"] - 1
+            out["benchmark_return"], out["benchmark_name"] = now_mark.price4 / start["open4"] - 1, "SPY"
     return out
 
 
