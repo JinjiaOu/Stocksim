@@ -48,3 +48,14 @@ with TestClient(app) as c:
     bars = c.get("/api/market/bars/NVDA", params={"account_id": aid}).json()
     print("replay bars last:", bars[-1])
     show("orders", c.get("/api/orders", params={"account_id": aid}))
+
+    # --- fx (forex) live account ---
+    fx = show("new fx account", c.post("/api/accounts", json={"mode": "live", "market": "fx", "leverage": 20}))
+    faid = fx["id"]
+    fx_st = show("fx status", c.get("/api/market/status", params={"account_id": faid}))
+    show("fx quote EURUSD=X", c.get("/api/market/quote/EURUSD=X", params={"account_id": faid}))
+    if fx_st["open"]:
+        show("fx market buy", c.post("/api/orders", json={"account_id": faid, "symbol": "EURUSD=X",
+                                                          "side": "buy", "type": "market", "qty": 1000}))
+    else:
+        print("休市，跳过下单")
