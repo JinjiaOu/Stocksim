@@ -75,6 +75,8 @@ const withAcct = (path) => `${path}${path.includes('?') ? '&' : '?'}account_id=$
 
 // Server messages rewritten in plain words for simple mode.
 const PLAIN = [
+  [/^外汇市场休市.*/, '外汇周末休市：美东时间周五 17:00 到周日 17:00 不能交易'],
+  [/^无最新行情（可能为外汇假日.*/, '现在拿不到最新汇率，可能是外汇假日，或者行情服务暂时出了问题'],
   [/^市场未开盘.*/, '现在休市。美股开市时间：美东时间周一到周五 9:30–16:00'],
   [/^无最新行情.*/, '今天可能是美股放假，或者暂时拿不到最新价格'],
   [/^行情过期$/, '价格不是最新的，暂时不能按这个价格买卖'],
@@ -94,9 +96,11 @@ const PLAIN = [
 ];
 function plain(msg) {
   if (!state.simple || !msg) return msg;
-  if (isFx()) return msg.replaceAll('该股票', '该货币对').replaceAll('股票', '货币对').replaceAll('股价', '汇价');
-  for (const [re, out] of PLAIN) if (re.test(msg)) return msg.replace(re, out);
-  return msg;
+  for (const [re, out] of PLAIN) {
+    if (isFx() && out.includes('美股')) continue;
+    if (re.test(msg)) { msg = msg.replace(re, out); break; }
+  }
+  return isFx() ? msg.replaceAll('该股票', '该货币对').replaceAll('股票', '货币对').replaceAll('股价', '汇价') : msg;
 }
 
 async function api(path, opts = {}) {
