@@ -186,12 +186,13 @@ async function loadChart() {
   const token = ++chartToken;
   if (!state.symbol) return;
   const sym = state.symbol;
+  const accountId = state.accountId;
   try {
     const [bars, fills] = await Promise.all([
       api(withAcct(`/api/market/bars/${encodeURIComponent(sym)}?range=${state.range}`)),
       api(withAcct('/api/fills?limit=500')),
     ]);
-    if (token !== chartToken) return;
+    if (token !== chartToken || accountId !== state.accountId) return;
     const intraday = typeof bars[0]?.time === 'number';
     const data = bars.map((b) => ({ ...b, time: intraday ? etWall(b.time) : b.time }));
     candles.setData(data.map(({ time, open, high, low, close }) => ({ time, open, high, low, close })));
@@ -200,7 +201,7 @@ async function loadChart() {
     chartMsg(data.length ? '' : T(isFx() ? '这个货币对暂时没有价格走势图' : '这只股票暂时没有价格走势图', '暂无 K 线数据'));
     chart.timeScale().fitContent();
   } catch (e) {
-    if (token !== chartToken) return;
+    if (token !== chartToken || accountId !== state.accountId) return;
     candles.setData([]); volume.setData([]);
     chartMsg(plain(e.message));
   }
@@ -273,7 +274,9 @@ function accountLabel(a) {
 }
 
 async function loadStatus() {
+  const accountId = state.accountId;
   const s = await api(withAcct('/api/market/status'));
+  if (accountId !== state.accountId) return;
   state.status = s;
   const pill = $('#market-pill');
   if (state.account?.status === 'bust') {
@@ -390,7 +393,9 @@ function fullSummary(p) {
 }
 
 async function loadPortfolio() {
+  const accountId = state.accountId;
   const p = await api(withAcct('/api/portfolio'));
+  if (accountId !== state.accountId) return;
   state.portfolio = p;
   renderMarginBanner(p);
   $('#summary').innerHTML = (state.simple ? simpleSummary(p) : fullSummary(p))
@@ -401,7 +406,10 @@ async function loadPortfolio() {
 
 // ---------- watchlist & company list ----------
 async function loadWatchlist() {
-  state.watch = await api(withAcct('/api/watchlist'));
+  const accountId = state.accountId;
+  const watch = await api(withAcct('/api/watchlist'));
+  if (accountId !== state.accountId) return;
+  state.watch = watch;
   const el = $('#watchlist');
   if (!state.watch.length) {
     el.innerHTML = `<li class="empty">${isFx() ? '还没有关注的货币对。去"货币对列表"里点 ☆ 加入自选' : T('还没有关注的股票。去"公司列表"里点 ☆ 就能加进来', '在"公司列表"里或搜索股票后点 ☆ 加入自选')}</li>`;
@@ -445,10 +453,13 @@ let companyQuotesAt = 0;
 async function loadCompanyQuotes(force = false) {
   if (!force && Date.now() - companyQuotesAt < 25000) return;
   companyQuotesAt = Date.now();
+  const accountId = state.accountId;
   try {
     const symbols = catalog().map((c) => c.symbol).join(',');
-    state.companyQuotes = await api(withAcct(`/api/market/quotes?symbols=${encodeURIComponent(symbols)}`));
-  } catch { state.companyQuotes = {}; }
+    const quotes = await api(withAcct(`/api/market/quotes?symbols=${encodeURIComponent(symbols)}`));
+    if (accountId !== state.accountId) return;
+    state.companyQuotes = quotes;
+  } catch { if (accountId !== state.accountId) return; state.companyQuotes = {}; }
   if (state.list === 'companies') renderCompanies();
 }
 
@@ -472,12 +483,13 @@ async function toggleWatch(sym) {
 async function loadQuote() {
   if (!state.symbol) return;
   const sym = state.symbol;
+  const accountId = state.accountId;
   $('#q-symbol').textContent = sym;
   const info = symbolInfo(sym);
   $('#q-desc').textContent = info ? `${info.cn}（${info.en}）· ${info.sector} · ${info.desc}` : '';
   try {
     const q = await api(withAcct(`/api/market/quote/${encodeURIComponent(sym)}`));
-    if (sym !== state.symbol) return;
+    if (sym !== state.symbol || accountId !== state.accountId) return;
     state.quote = q;
     $('#q-price').textContent = fmtPx(q.price);
     const chg = q.prev_close ? q.price - q.prev_close : null;
@@ -497,7 +509,7 @@ async function loadQuote() {
     if (!q.tradable && q.reason) meta.push(`<span class="stale">${esc(plain(q.reason))}</span>`);
     $('#q-meta').innerHTML = meta.join(' · ');
   } catch (e) {
-    if (sym !== state.symbol) return;
+    if (sym !== state.symbol || accountId !== state.accountId) return;
     state.quote = null;
     $('#q-price').textContent = '—';
     $('#q-change').textContent = '';
@@ -548,6 +560,7 @@ function positionsTable(p) {
 
 async function loadTab() {
   const tab = state.tab;
+  const accountId = state.accountId;
   let html = '';
   if (tab === 'positions') {
     html = positionsTable(state.portfolio ?? await api(withAcct('/api/portfolio')));
@@ -578,7 +591,7 @@ async function loadTab() {
         <td class="${f.side === 'buy' ? 'up' : 'down'}">${SIDE[f.side]}</td><td>${f.qty}</td><td>${fmtPx(f.price)}</td>
         <td>${fmtUsd(f.amount)}</td><td>${fmtUsd(f.fees)}</td><td class="muted small">${f.estimated ? '模拟估算' : ''}</td></tr>`), '暂无成交');
   }
-  if (tab === state.tab) $('#tab-body').innerHTML = html;
+  if (tab === state.tab && accountId === state.accountId) $('#tab-body').innerHTML = html;
 }
 
 function selectTab(tab) {
@@ -823,10 +836,22 @@ async function switchAccount(id) {
   state.accountId = id;
   store.set('accountId', String(id));
   state.portfolio = null;
+  state.status = null;
+  state.quote = null;
+  chartToken += 1;
+  candles.setData([]);
+  volume.setData([]);
   state.companyQuotes = {};
   await loadAccounts();
   state.symbol = store.get(symbolKey(), isFx() ? 'EURUSD=X' : 'SPY');
   state.quote = null;
+  $('#q-symbol').textContent = state.symbol;
+  $('#q-price').textContent = '…';
+  $('#q-change').textContent = '';
+  $('#q-meta').textContent = '';
+  $('#q-desc').textContent = '';
+  $('#tab-body').innerHTML = '';
+  renderTicket();
   await refreshAll();
   loadChart();
   if (state.list === 'companies') loadCompanyQuotes(true);
