@@ -3,6 +3,7 @@
 If StockSim is already running, just open the browser and exit.
 """
 import logging
+import os
 import socket
 import sys
 import threading
@@ -12,7 +13,7 @@ import uvicorn
 
 from app import db, main as server
 
-HOST, PORT = "127.0.0.1", 8765
+HOST, PORT = "127.0.0.1", int(os.environ.get("STOCKSIM_PORT", 8765))
 URL = f"http://{HOST}:{PORT}/"
 
 

@@ -8,7 +8,7 @@ from pathlib import Path
 APP_ROOT = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent.parent
 DB_PATH = Path(os.environ.get("STOCKSIM_DB") or APP_ROOT / "data" / "stocksim.db")
 LIVE_INITIAL_CENTS = 100_000_00
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # Cash accounts may never go negative; margin accounts borrow (negative cash) and short (negative qty).
 ACCOUNTS_DDL = """
@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS {name} (
     id                INTEGER PRIMARY KEY,
     mode              TEXT NOT NULL CHECK (mode IN ('live', 'replay')),
     account_type      TEXT NOT NULL DEFAULT 'cash' CHECK (account_type IN ('cash', 'margin')),
+    market            TEXT NOT NULL DEFAULT 'us' CHECK (market IN ('us', 'fx')),
     status            TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'finished', 'archived', 'bust')),
     name              TEXT NOT NULL,
     initial_cents     INTEGER NOT NULL CHECK (initial_cents > 0),
@@ -153,6 +154,8 @@ def init(conn: sqlite3.Connection) -> None:
 
     if conn.execute("PRAGMA user_version").fetchone()[0] < 1 and _columns(conn, "accounts"):
         _migrate_v1(conn)
+    if _columns(conn, "accounts") and "market" not in _columns(conn, "accounts"):
+        _migrate_v2(conn)
     conn.executescript(SCHEMA)
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     with tx(conn):
@@ -185,3 +188,10 @@ def _migrate_v1(conn) -> None:
                 raise RuntimeError(f"foreign key check failed after migration: {bad[:5]}")
     finally:
         conn.execute("PRAGMA foreign_keys = ON")
+
+
+def _migrate_v2(conn) -> None:
+    """v1 -> v2: accounts.market ('us' stocks / 'fx' currency pairs); existing accounts are stock accounts."""
+    with tx(conn):
+        conn.execute("ALTER TABLE accounts ADD COLUMN market TEXT NOT NULL DEFAULT 'us'"
+                     " CHECK (market IN ('us', 'fx'))")

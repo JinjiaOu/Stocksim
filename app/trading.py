@@ -44,18 +44,33 @@ def margin_params(leverage: float) -> dict:
     return {"initial_margin_bps": initial, "maint_long_bps": initial // 2, "maint_short_bps": initial * 6 // 10}
 
 
+# Forex accounts: always margin, symmetric maintenance, ~1 pip spread, no financing (overnight swap is out of scope).
+FX_LEVERAGES = (10, 20)
+FX_DEFAULTS = {"slippage_bps": 1, "margin_rate_bps": 0, "borrow_rate_bps": 0}
+
+
 def create_account(conn, mode, name, initial_cents, now: datetime, account_type="cash", leverage=1.0,
-                   start_date=None, sim_date=None, sim_phase=None, accrued_through=None) -> int:
-    params = margin_params(leverage) if account_type == "margin" else margin_params(1) | {
-        "maint_long_bps": 0, "maint_short_bps": 0}
+                   start_date=None, sim_date=None, sim_phase=None, accrued_through=None, market="us") -> int:
+    if market == "fx":
+        if leverage not in FX_LEVERAGES:
+            raise TradeError("外汇账户杠杆只能是 10x 或 20x")
+        account_type = "margin"
+        params = margin_params(leverage)
+        params["maint_short_bps"] = params["maint_long_bps"]
+        extra = FX_DEFAULTS
+    else:
+        params = margin_params(leverage) if account_type == "margin" else margin_params(1) | {
+            "maint_long_bps": 0, "maint_short_bps": 0}
+        extra = {}
+    cols = ("mode", "account_type", "market", "name", "initial_cents", "cash_cents", "initial_margin_bps",
+            "maint_long_bps", "maint_short_bps", "accrued_through", "start_date", "sim_date", "sim_phase",
+            "created_at", *extra)
+    values = (mode, account_type, market, name, initial_cents, initial_cents, params["initial_margin_bps"],
+              params["maint_long_bps"], params["maint_short_bps"], accrued_through, start_date, sim_date,
+              sim_phase, iso(now), *extra.values())
     with db.tx(conn):
-        cur = conn.execute(
-            "INSERT INTO accounts (mode, account_type, name, initial_cents, cash_cents, initial_margin_bps,"
-            " maint_long_bps, maint_short_bps, accrued_through, start_date, sim_date, sim_phase, created_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (mode, account_type, name, initial_cents, initial_cents, params["initial_margin_bps"],
-             params["maint_long_bps"], params["maint_short_bps"], accrued_through, start_date, sim_date,
-             sim_phase, iso(now)))
+        cur = conn.execute(f"INSERT INTO accounts ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
+                           values)
         account_id = cur.lastrowid
         _ledger(conn, account_id, initial_cents, "deposit", None, now)
         return account_id
