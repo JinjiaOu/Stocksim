@@ -6,13 +6,18 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from . import db, replay, trading
-from .market import ET, LiveMarket, YFinanceProvider, session_date
+from .market import ET, FxLiveMarket, LiveMarket, YFinanceProvider
 from .models import iso, to_price4, utcnow
 from .trading import TradeError
 
 router = APIRouter(prefix="/api")
 provider = YFinanceProvider()
 live = LiveMarket(provider)
+live_fx = FxLiveMarket(provider)
+
+
+def live_of(acct) -> LiveMarket:
+    return live_fx if acct["market"] == "fx" else live
 
 SYMBOL_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,11}(=X)?$")  # =X: Yahoo currency pairs
 
@@ -58,14 +63,15 @@ def prev_close(conn, acct, q) -> float | None:
                            (q.symbol, acct["sim_date"])).fetchone()
         return row["close4"] / 1e4 if row else None
     closes = provider.daily_closes([q.symbol])[q.symbol]  # served from cache when pre-fetched in batch
-    day = q.as_of.astimezone(ET).date()
+    # Forex days roll at 17:00 ET, so a Monday-evening quote already belongs to Tuesday.
+    day = live_fx.session_date(q.as_of) if acct["market"] == "fx" else q.as_of.astimezone(ET).date()
     before = [d for d in closes if d < day]
     return closes[max(before)] if before else None
 
 
 def live_quotes_json(conn, acct, symbols):
     now = utcnow()
-    quotes = live.quotes(symbols, now) if symbols else {}
+    quotes = live_of(acct).quotes(symbols, now) if symbols else {}
     provider.daily_closes(symbols)
     return {s: quote_json(q, now, prev_close(conn, acct, q)) for s in symbols if (q := quotes.get(s))}
 
@@ -181,7 +187,7 @@ def advance_replay(body: Advance, conn=Depends(get_conn)):
 def market_status(account_id: int | None = None, conn=Depends(get_conn)):
     acct = account_of(conn, account_id)
     if acct["mode"] == "live":
-        return live.status(utcnow())
+        return live_of(acct).status(utcnow())
     return {"mode": "replay", "open": acct["status"] == "active", "status": acct["status"],
             "reason": None if acct["status"] == "active" else "回放已结束",
             "now": iso(replay.now_of(acct)), "sim_date": acct["sim_date"], "sim_phase": acct["sim_phase"],
@@ -189,8 +195,8 @@ def market_status(account_id: int | None = None, conn=Depends(get_conn)):
 
 
 @router.get("/market/search")
-def search(q: str = Query(min_length=1, max_length=40)):
-    return provider.search(q.strip())
+def search(q: str = Query(min_length=1, max_length=40), market: Literal["us", "fx"] = "us"):
+    return provider.search(q.strip(), market)
 
 
 @router.get("/market/quotes")
@@ -211,7 +217,7 @@ def get_quote(symbol: str, account_id: int | None = None, conn=Depends(get_conn)
     acct = account_of(conn, account_id)
     if acct["mode"] == "live":
         now = utcnow()
-        q = live.quotes([s], now).get(s)
+        q = live_of(acct).quotes([s], now).get(s)
     else:
         replay_ready(conn, acct, s)
         now, q = None, replay.quote(conn, acct, s)
@@ -263,7 +269,7 @@ def marks_for(conn, acct, symbols) -> dict:
     if not symbols:
         return {}
     if acct["mode"] == "live":
-        return live.quotes(list(symbols), utcnow())
+        return live_of(acct).quotes(list(symbols), utcnow())
     return {s: replay.mark(conn, acct, s) for s in symbols}
 
 
@@ -273,8 +279,8 @@ def place_order(body: OrderIn, conn=Depends(get_conn)):
     acct = account_of(conn, body.account_id)
     if acct["mode"] == "live":
         now = utcnow()
-        q = live.quotes([s], now).get(s)
-        trade_date = session_date(now).isoformat()
+        q = live_of(acct).quotes([s], now).get(s)
+        trade_date = live_of(acct).session_date(now).isoformat()
     else:
         replay_ready(conn, acct, s)
         now, q = replay.now_of(acct), replay.quote(conn, acct, s)

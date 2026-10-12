@@ -12,8 +12,8 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import db, trading
-from .api import live, router
-from .market import ET, session_date
+from .api import live_of, router
+from .market import ET
 from .models import utcnow
 
 log = logging.getLogger("stocksim")
@@ -40,12 +40,13 @@ def live_tick() -> None:
         today = now.astimezone(ET).date().isoformat()
         for acct in conn.execute("SELECT * FROM accounts WHERE mode = 'live' AND status = 'active'").fetchall():
             account_id = acct["id"]
-            trading.expire_orders(conn, account_id, session_date(now).isoformat(), now)
+            market = live_of(acct)
+            trading.expire_orders(conn, account_id, market.session_date(now).isoformat(), now)
             held = trading.held_symbols(conn, account_id)
             symbols = sorted({o["symbol"] for o in trading.open_orders(conn, account_id)} | set(held))
             if not symbols:
                 continue
-            quotes = live.quotes(symbols, now)
+            quotes = market.quotes(symbols, now)
             if any(q.tradable for q in quotes.values()):
                 n = trading.match_open_orders(conn, account_id, quotes, now)
                 if n:

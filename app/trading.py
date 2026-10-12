@@ -13,7 +13,6 @@ Two account types:
 
 Equity is always cash + Σ qty × price; a short's negative value is its buy-back liability.
 """
-import re
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -49,7 +48,8 @@ def margin_params(leverage: float) -> dict:
 FX_LEVERAGES = (10, 20)
 FX_DEFAULTS = {"slippage_bps": 1, "margin_rate_bps": 0, "borrow_rate_bps": 0}
 FX_LOT = 1000  # orders are whole micro lots
-FX_SYMBOL = re.compile(r"^[A-Z]{3}USD=X$")  # v1: USD-quoted pairs only, so price × units is already in dollars
+# v1: USD-quoted majors only, so price × units is already in dollars and 4 decimals is one pip.
+FX_PAIRS = ("EURUSD=X", "GBPUSD=X", "AUDUSD=X", "NZDUSD=X")
 
 
 def symbol_market(symbol: str) -> str:
@@ -174,8 +174,8 @@ def place_order(conn, account_id: int, symbol: str, side: str, otype: str, qty: 
         if symbol_market(symbol) != acct["market"]:
             raise TradeError("该账户不能交易此品种")
         if acct["market"] == "fx":
-            if not FX_SYMBOL.match(symbol):
-                raise TradeError("目前只支持以美元报价的货币对（如 EURUSD=X）")
+            if symbol not in FX_PAIRS:
+                raise TradeError("目前只支持 EURUSD、GBPUSD、AUDUSD、NZDUSD 四个货币对")
             if qty % FX_LOT:
                 raise TradeError("外汇按 1000 单位（微型手）的整数倍下单")
 
