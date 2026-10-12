@@ -76,7 +76,7 @@ def replay_ready(conn, acct, symbol):
 
 
 def account_json(a):
-    return {k: a[k] for k in ("id", "mode", "account_type", "status", "name", "start_date", "sim_date", "sim_phase",
+    return {k: a[k] for k in ("id", "mode", "account_type", "market", "status", "name", "start_date", "sim_date", "sim_phase",
                               "created_at")} | {
         "initial": a["initial_cents"] / 100, "slippage_bps": a["slippage_bps"], "commission": a["commission_cents"] / 100,
         "leverage": round(10000 / a["initial_margin_bps"], 2), "maint_long_bps": a["maint_long_bps"],
@@ -98,7 +98,8 @@ def list_accounts(conn=Depends(get_conn)):
 class NewAccount(BaseModel):
     mode: Literal["live", "replay"] = "replay"
     account_type: Literal["cash", "margin"] = "cash"
-    leverage: Literal[1, 2, 4] = 2
+    market: Literal["us", "fx"] = "us"
+    leverage: Literal[1, 2, 4, 10, 20] | None = None  # us margin: 1/2/4 (default 2); fx: 10/20 (default 20)
     start_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     initial: Decimal = Field(default=Decimal(100_000), ge=Decimal(1000), le=Decimal(1_000_000_000))
 
@@ -106,15 +107,26 @@ class NewAccount(BaseModel):
 @router.post("/accounts")
 def new_account(body: NewAccount, conn=Depends(get_conn)):
     initial = int(body.initial * 100)
-    leverage = body.leverage if body.account_type == "margin" else 1
+    if body.market == "fx":
+        account_type, leverage = "margin", body.leverage or 20
+        if leverage not in trading.FX_LEVERAGES:
+            raise HTTPException(422, "外汇账户杠杆只能是 10x 或 20x")
+    else:
+        account_type = body.account_type
+        leverage = (body.leverage or 2) if account_type == "margin" else 1
+        if leverage not in (1, 2, 4):
+            raise HTTPException(422, "股票保证金账户杠杆只能是 1x、2x 或 4x")
     try:
         if body.mode == "replay":
-            account_id = replay.new_game(conn, provider, initial, body.start_date, account_type=body.account_type,
-                                         leverage=leverage)
+            account_id = replay.new_game(conn, provider, initial, body.start_date, account_type=account_type,
+                                         leverage=leverage, market=body.market)
         else:
-            label = "实时 · 现金" if body.account_type == "cash" else f"实时 · 保证金 {leverage}x"
-            account_id = trading.create_account(conn, "live", label, initial, utcnow(), account_type=body.account_type,
-                                                leverage=leverage, accrued_through=et_today())
+            if body.market == "fx":
+                label = f"实时 · 外汇 {leverage}x"
+            else:
+                label = "实时 · 现金" if account_type == "cash" else f"实时 · 保证金 {leverage}x"
+            account_id = trading.create_account(conn, "live", label, initial, utcnow(), account_type=account_type,
+                                                leverage=leverage, accrued_through=et_today(), market=body.market)
     except TradeError as e:
         raise HTTPException(e.status, str(e))
     return account_json(trading.get_account(conn, account_id))

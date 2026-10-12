@@ -45,7 +45,8 @@ def ensure_daily(conn, provider: MarketDataProvider, symbol: str, need_through: 
 
 
 def new_game(conn, provider: MarketDataProvider, initial_cents: int, start_date: str | None = None,
-             rng: random.Random | None = None, account_type: str = "cash", leverage: float = 1.0) -> int:
+             rng: random.Random | None = None, account_type: str = "cash", leverage: float = 1.0,
+             market: str = "us") -> int:
     if not ensure_daily(conn, provider, CALENDAR):
         raise TradeError("无法获取交易日历（SPY 历史数据）", 503)
     dates = [r["date"] for r in conn.execute("SELECT date FROM daily_bars WHERE symbol = ? ORDER BY date",
@@ -62,7 +63,7 @@ def new_game(conn, provider: MarketDataProvider, initial_cents: int, start_date:
         conn.execute("UPDATE accounts SET status = 'archived' WHERE mode = 'replay' AND status != 'archived'")
         return create_account(conn, "replay", f"回放 {start}", initial_cents, utcnow(), account_type=account_type,
                               leverage=leverage, start_date=start, sim_date=start, sim_phase="open",
-                              accrued_through=start)
+                              accrued_through=start, market=market)
 
 
 def sim_time(d: str, phase: str) -> datetime:
