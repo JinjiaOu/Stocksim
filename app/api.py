@@ -14,7 +14,7 @@ router = APIRouter(prefix="/api")
 provider = YFinanceProvider()
 live = LiveMarket(provider)
 
-SYMBOL_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,11}$")
+SYMBOL_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,11}(=X)?$")  # =X: Yahoo currency pairs
 
 
 def get_conn():
@@ -28,7 +28,7 @@ def get_conn():
 def symbol_of(raw: str) -> str:
     s = raw.strip().upper()
     if not SYMBOL_RE.match(s):
-        raise HTTPException(400, "无效的股票代码")
+        raise HTTPException(400, "无效的代码")
     return s
 
 
